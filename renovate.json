@@ -1,0 +1,63 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>defakto-security/github-actions//renovate-shared"
+  ],
+  "packageRules": [
+    {
+      "description": "OpenTelemetry modules are a version-locked family: the otel core/sdk/exporters move together and the otelslog contrib bridge trails the log minor by one. Separate PRs each fail CI because the set must move as a unit (and the bridge is never one of the flagged modules). matchSourceUrls catches both go.opentelemetry.io/* and go.opentelemetry.io/contrib/* (the bridge). Group into one PR.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchSourceUrls": [
+        "https://github.com/open-telemetry/**"
+      ],
+      "groupName": "opentelemetry"
+    },
+    {
+      "description": "go.temporal.io/* (server, api, sdk) move as a set; a server bump that outpaces its api pin breaks the build. Group so they arrive as one PR.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchSourceUrls": [
+        "https://github.com/temporalio/**"
+      ],
+      "groupName": "temporal"
+    },
+    {
+      "description": "Automerge updates that ci.yaml actually exercises and that cannot mutate infrastructure on merge. Merging to main publishes an image via publish.yaml, which is the intended outcome.",
+      "matchManagers": [
+        "gomod",
+        "github-actions",
+        "mise"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Actions used only by publish.yaml (AWS auth, ECR push, buildx). ci.yaml's pull_request checks never invoke them, so a bad bump would surface only after merge. Review by hand.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "aws-actions/configure-aws-credentials",
+        "aws-actions/amazon-ecr-login",
+        "docker/setup-buildx-action"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "The runtime base image is only built by publish.yaml, never on a pull request. Review by hand.",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "automerge": false
+    }
+  ]
+}
