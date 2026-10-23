@@ -1,0 +1,15 @@
+// Cedar schema for defakto-spiffe-temporal. Authored for CI validation and
+// documentation of the entity/action model. Per the project design, the
+// cedar-go validator is experimental, so runtime authorization does NOT depend
+// on this schema — it is a CI/documentation artifact.
+namespace Temporal {
+  entity RoleClass;
+  entity VerbClass;
+  entity Namespace;
+
+  action "read-only", "start-signal", "worker", "break-glass", "forbidden-all"
+    appliesTo {
+      principal: [RoleClass],
+      resource: [Namespace],
+    };
+}
