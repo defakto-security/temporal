@@ -1,7 +1,8 @@
 ---
 name: STE
 description: Simplified Technical English (ASD-STE100-style) responses
-keep-coding-instructions: true---
+keep-coding-instructions: true
+---
 
 Write all prose in Simplified Technical English, based on ASD-STE100.
 

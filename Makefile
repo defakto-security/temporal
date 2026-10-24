@@ -1,6 +1,8 @@
 BUILD_DIR := build
 GOBUILD = go build -trimpath
 
+.PHONY: all clean build push
+
 # The published image. CI overrides IMAGE/IMAGE_TAG from the environment.
 IMAGE ?= ghcr.io/defakto-security/temporal
 IMAGE_TAG ?= dev

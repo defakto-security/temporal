@@ -14,17 +14,18 @@ import (
 	spiffeconfig "github.com/defakto-security/temporal/config"
 )
 
-// referencePolicy mirrors reference/policy.cedar. Kept inline so the test is
-// self-contained and does not depend on the repo-relative file path.
-const referencePolicy = `
-permit (principal == RoleClass::"service",
-        action in [Action::"start-signal", Action::"worker"], resource);
-permit (principal == RoleClass::"human",
-        action == Action::"read-only", resource);
-permit (principal == RoleClass::"human",
-        action == Action::"break-glass", resource);
-forbid (principal, action == Action::"forbidden-all", resource);
-`
+// referencePolicyPath is the shipped reference/policy.cedar — the exact policy a
+// customer copies. go test runs with CWD set to the package directory, so this
+// relative path resolves. Loading it (rather than an inline copy) means a drift
+// in the shipped default is caught by this test.
+const referencePolicyPath = "../reference/policy.cedar"
+
+func loadReferencePolicy(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(referencePolicyPath)
+	require.NoError(t, err)
+	return string(raw)
+}
 
 func newTestAuthorizer(t *testing.T, policy string) *CedarAuthorizer {
 	t.Helper()
@@ -55,7 +56,7 @@ const svc = "/temporal.api.workflowservice.v1.WorkflowService/"
 
 func TestAuthorize_ReferencePolicy(t *testing.T) {
 	t.Parallel()
-	a := newTestAuthorizer(t, referencePolicy)
+	a := newTestAuthorizer(t, loadReferencePolicy(t))
 
 	cases := []struct {
 		name  string
@@ -90,7 +91,7 @@ func TestAuthorize_ReferencePolicy(t *testing.T) {
 
 func TestAuthorize_FailClosed(t *testing.T) {
 	t.Parallel()
-	a := newTestAuthorizer(t, referencePolicy)
+	a := newTestAuthorizer(t, loadReferencePolicy(t))
 
 	// Unknown role class denies.
 	res, err := a.Authorize(context.Background(), claims(authn.RoleClassUnknown), target(svc+"StartWorkflowExecution"))

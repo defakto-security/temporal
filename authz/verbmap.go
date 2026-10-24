@@ -33,8 +33,8 @@ const (
 // "/temporal.api.workflowservice.v1.WorkflowService/StartWorkflowExecution"
 // becomes "StartWorkflowExecution".
 func shortName(apiName string) string {
-	if i := strings.LastIndex(apiName, "/"); i >= 0 {
-		return apiName[i+1:]
+	if _, after, found := strings.CutLast(apiName, "/"); found {
+		return after
 	}
 	return apiName
 }
