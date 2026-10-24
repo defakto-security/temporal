@@ -2,12 +2,15 @@
 # image to the defakto-spiffe-temporal build, and mount the ConfigMap carrying
 # the trust-domain/issuer config and the Cedar policy. No chart fork.
 #
-#   helm upgrade --install temporal temporal/temporal -f values.example.yaml
+#   # Run from the repository root:
+#   helm upgrade --install temporal temporal/temporal -f reference/values.example.yaml
 
 server:
   image:
     repository: <account>.dkr.ecr.us-east-1.amazonaws.com/defakto-spiffe-temporal
-    tag: latest
+    # Pin an immutable, commit-specific tag — the publish workflow tags images
+    # as <commit-sha>-<run-id>. Do not use a mutable tag like `latest`.
+    tag: <commit-sha>-<run-id>
 
   # Mount the ConfigMap (reference/configmap.example.yaml) and point the module
   # at its config file.

@@ -26,9 +26,11 @@ permit (
   resource
 );
 
-// break-glass (Terminate / RequestCancel / Reset) is granted to humans here,
-// but the on-call-grant gate is enforced in the authorizer before Cedar is
-// consulted (FRY-1374). Keeping the permit here documents the human capability.
+// break-glass (Terminate / RequestCancel / Reset) is granted to humans here.
+// NOTE: the on-call-grant gate (FRY-1374) is NOT implemented yet — the
+// authorizer does not check on-call status before consulting Cedar, so this
+// permit currently grants break-glass to any human. Until FRY-1374 lands, this
+// is the only control on break-glass.
 permit (
   principal == RoleClass::"human",
   action == Action::"break-glass",
