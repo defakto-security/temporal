@@ -53,6 +53,7 @@ func target(api string) *authorization.CallTarget {
 }
 
 const svc = "/temporal.api.workflowservice.v1.WorkflowService/"
+const adminSvc = "/temporal.server.api.adminservice.v1.AdminService/"
 
 func TestAuthorize_ReferencePolicy(t *testing.T) {
 	t.Parallel()
@@ -73,6 +74,11 @@ func TestAuthorize_ReferencePolicy(t *testing.T) {
 		{"human worker denied", authn.RoleClassHuman, svc + "PollActivityTaskQueue", false},
 		{"destruction forbidden for service", authn.RoleClassService, svc + "DeleteWorkflowExecution", false},
 		{"destruction forbidden for human", authn.RoleClassHuman, svc + "DeleteWorkflowExecution", false},
+
+		// AdminService is forbidden for every role: DescribeMutableState must
+		// not slip through as a WorkflowService read-only.
+		{"admin describe-mutable-state denied for service", authn.RoleClassService, adminSvc + "DescribeMutableState", false},
+		{"admin describe-mutable-state denied for human", authn.RoleClassHuman, adminSvc + "DescribeMutableState", false},
 	}
 
 	for _, tc := range cases {

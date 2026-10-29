@@ -7,7 +7,7 @@
 
 server:
   image:
-    repository: <account>.dkr.ecr.us-east-1.amazonaws.com/defakto-spiffe-temporal
+    repository: ghcr.io/defakto-security/temporal
     # Pin an immutable, commit-specific tag — the publish workflow tags images
     # as <commit-sha>-<run-id>. Do not use a mutable tag like `latest`.
     tag: <commit-sha>-<run-id>

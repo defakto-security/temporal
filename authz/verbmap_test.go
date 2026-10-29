@@ -37,6 +37,14 @@ func TestVerbClassOf(t *testing.T) {
 		{"/temporal.server.api.adminservice.v1.AdminService/RemoveTask", VerbForbiddenAll},
 		{"/temporal.server.api.adminservice.v1.AdminService/DescribeHistoryHost", VerbForbiddenAll},
 
+		// AdminService RPCs are forbidden by service, NOT classified by the
+		// bare-name prefix rules. DescribeMutableState shares a name shape with
+		// WorkflowService reads but must never be treated as read-only.
+		{"/temporal.server.api.adminservice.v1.AdminService/DescribeMutableState", VerbForbiddenAll},
+		{"/temporal.server.api.adminservice.v1.AdminService/GetWorkflowExecutionRawHistory", VerbForbiddenAll},
+		{"/temporal.server.api.adminservice.v1.AdminService/ListClusters", VerbForbiddenAll},
+		{"/temporal.server.api.adminservice.v1.AdminService/AddSearchAttributes", VerbForbiddenAll},
+
 		// A GetXxx without History is not read-only by the prefix rule.
 		{svc + "GetClusterInfo", VerbUnknown},
 		{svc + "SomeBrandNewRPC", VerbUnknown},
