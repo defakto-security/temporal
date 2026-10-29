@@ -39,6 +39,15 @@ func shortName(apiName string) string {
 	return apiName
 }
 
+// isAdminService reports whether a full APIName targets the low-level
+// AdminService. Its method names collide with WorkflowService's (both have a
+// DescribeMutableState, a Describe*/Get* surface), so the service must be read
+// off the full path before the bare-name prefix rules run — otherwise an admin
+// RPC is misclassified as a benign WorkflowService read.
+func isAdminService(apiName string) bool {
+	return strings.Contains(apiName, ".adminservice.")
+}
+
 // exactVerbClass maps the APIs whose classification is not a prefix rule.
 // Kept small and explicit; prefix rules in VerbClassOf handle the long tail.
 var exactVerbClass = map[string]VerbClass{
@@ -62,6 +71,16 @@ func VerbClassOf(apiName string) VerbClass {
 	name := shortName(apiName)
 	if c, ok := exactVerbClass[name]; ok {
 		return c
+	}
+	// AdminService is the low-level operator surface (shard/history/task
+	// internals). Its method names overlap WorkflowService's — e.g. both expose
+	// a DescribeMutableState — so it is resolved by SERVICE here, before the
+	// bare-name prefix rules below could mistake an admin Describe* for a
+	// WorkflowService read-only call. No SPIFFE-identity caller has a
+	// legitimate need for AdminService, so anything not already named in the
+	// forbidden exact map is forbidden rather than classified by prefix.
+	if isAdminService(apiName) {
+		return VerbForbiddenAll
 	}
 	switch {
 	case strings.HasPrefix(name, "Describe"),

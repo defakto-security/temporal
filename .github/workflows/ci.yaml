@@ -11,10 +11,17 @@ permissions:
 
 jobs:
   golang:
+    timeout-minutes: 30
     runs-on:
       - runs-on=${{ github.run_id }}
       - runner=2cpu-linux-arm64
+      - cpu=8
+      - ram=8+32
       - spot=false
+      # The default gp3 volume (125 MB/s, 3000 IOPS) saturates while the Go
+      # cache is restored, starving the runner agent until GitHub declares it
+      # lost. gp3 needs ~4 IOPS per MB/s, so 4000 IOPS supports 750 MB/s.
+      - volume=200gb:gp3:750mbs:4000iops
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,7 +41,7 @@ jobs:
       # Full config, but only fail on issues in code changed since the base branch.
       # Existing findings are grandfathered; new code must be clean.
       - name: lint (new code)
-        run: mise exec -- golangci-lint run --new-from-rev=origin/${{ github.base_ref || 'main' }} --timeout=3m
+        run: mise exec -- golangci-lint run --new-from-rev=origin/${{ github.base_ref || 'main' }} --timeout=10m
 
   all-green:
     needs: [ golang ]
