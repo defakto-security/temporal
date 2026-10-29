@@ -1,0 +1,30 @@
+# Reference config a customer copies into their ConfigMap and edits.
+# Mounted into the container; its path is passed via DEFAKTO_SPIFFE_TEMPORAL_CONFIG.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defakto-spiffe-temporal
+data:
+  # The module config contract (see config/config.go).
+  config.yaml: |
+    version: 1
+    trustDomain: corp.defakto.security
+    # Leading literal segment is the human/service prefix test key.
+    devIDTemplate: "/users/{domain}/{username}"
+    # Milestone 2 (Temporal Web): portal-issued OIDC verification.
+    human:
+      issuer: https://devportal.corp.defakto.security/
+      audience: temporal
+      jwksURL: https://devportal.corp.defakto.security/.well-known/jwks.json
+    policyPath: /etc/defakto-spiffe-temporal/policy.cedar
+
+  # The customer-owned Cedar policy. This copy is the shipped reference
+  # (destruction verbs forbidden by default); edit to set your own floor.
+  policy.cedar: |
+    permit (principal == RoleClass::"service",
+            action in [Action::"start-signal", Action::"worker"], resource);
+    permit (principal == RoleClass::"human",
+            action == Action::"read-only", resource);
+    permit (principal == RoleClass::"human",
+            action == Action::"break-glass", resource);
+    forbid (principal, action == Action::"forbidden-all", resource);

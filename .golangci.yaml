@@ -1,0 +1,115 @@
+# Adapted from github.com/defakto-security/development-portal for this
+# single-module server repo (no web/, no deploy/iac/).
+# Run with: mise run lint   (add --fix to apply autofixes)
+version: "2"
+linters:
+  enable:
+    - bodyclose
+    - depguard
+    - errorlint
+    - exhaustive
+    - gocritic
+    - misspell
+    - modernize
+    - nilerr
+    - nilnil
+    - noctx
+    - paralleltest
+    - revive
+    - tparallel
+    - usetesting
+    - wastedassign
+  settings:
+    depguard:
+      rules:
+        main:
+          list-mode: lax
+          deny:
+            - pkg: html/template
+              desc: I'm 99% sure you wanted text/template
+            - pkg: github.com/pkg/errors
+              desc: Do not use github.com/pkg/errors, use the standard library errors package instead.
+            - pkg: golang.org/x/exp/rand
+              desc: Do not use golang.org/x/exp/rand, use math/rand instead.
+            - pkg: golang.org/x/exp/slices
+              desc: Do not use golang.org/x/exp/slices, use the standard library slices package instead.
+    gocritic:
+      disabled-checks:
+        - singleCaseSwitch
+        - ifElseChain
+        - unlambda
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+        - loopclosure
+        - inline
+      enable-all: true
+    nilnil:
+      checked-types:
+        - ptr
+        - func
+        - iface
+        - chan
+        - uintptr
+        - unsafeptr
+    revive:
+      confidence: 0.8
+      severity: warning
+      rules:
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - noctx
+          - exhaustive
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  fix: false
+formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/defakto-security/temporal
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

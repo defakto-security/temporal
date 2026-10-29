@@ -1,0 +1,40 @@
+[env]
+GOPROXY = "https://proxy.golang.org,direct"
+
+[tools]
+go = "1.27.3"
+golangci-lint = "2.14.0"
+"go:golang.org/x/tools/cmd/goimports" = "0.38.0"
+
+#############################################################################
+# TASKS  (run: `mise run check` for the full PR gate)
+#############################################################################
+
+[tasks.check]
+depends = ["vet", "lint", "test"]
+description = "Runs all fast PR-gate checks"
+
+[tasks.lint]
+run = "golangci-lint run --timeout=3m --fix=$usage_fix"
+usage = 'flag "--fix" help="Apply autofixes" default=#false'
+description = "Lints Go code (golangci-lint)"
+
+[tasks.vet]
+depends = ["vet:go", "vet:mod-tidy"]
+description = "Runs all vet checks"
+
+[tasks."vet:go"]
+run = "go vet ./..."
+description = "go vet"
+
+[tasks."vet:mod-tidy"]
+run = "go mod tidy -diff"
+description = "Fails if go.mod/go.sum are not tidy"
+
+[tasks.test]
+run = "go test ./..."
+description = "Runs Go unit tests"
+
+[tasks.fmt]
+run = "golangci-lint fmt"
+description = "Formats Go code (gofmt + goimports with local-prefix)"
