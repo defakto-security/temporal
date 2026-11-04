@@ -65,6 +65,14 @@ var exactVerbClass = map[string]VerbClass{
 	"DescribeHistoryHost":     VerbForbiddenAll,
 }
 
+// adminVerbClass lists the AdminService methods explicitly classified.
+var adminVerbClass = map[string]VerbClass{
+	"DescribeMutableState":           VerbForbiddenAll,
+	"GetWorkflowExecutionRawHistory": VerbForbiddenAll,
+	"ListClusters":                   VerbForbiddenAll,
+	"AddSearchAttributes":            VerbForbiddenAll,
+}
+
 // VerbClassOf classifies a full APIName. It is the product-owned default; a
 // customer overrides behavior through policy, not by editing this table.
 func VerbClassOf(apiName string) VerbClass {
@@ -72,15 +80,15 @@ func VerbClassOf(apiName string) VerbClass {
 	if c, ok := exactVerbClass[name]; ok {
 		return c
 	}
-	// AdminService is the low-level operator surface (shard/history/task
-	// internals). Its method names overlap WorkflowService's — e.g. both expose
-	// a DescribeMutableState — so it is resolved by SERVICE here, before the
-	// bare-name prefix rules below could mistake an admin Describe* for a
-	// WorkflowService read-only call. No SPIFFE-identity caller has a
-	// legitimate need for AdminService, so anything not already named in the
-	// forbidden exact map is forbidden rather than classified by prefix.
+	// AdminService is the low-level operator surface. Its method names overlap
+	// WorkflowService's, so it is resolved by SERVICE before the prefix rules.
+	// Only explicitly listed admin methods are classified; any other admin
+	// method stays VerbUnknown (denied, fail closed) until someone classifies it.
 	if isAdminService(apiName) {
-		return VerbForbiddenAll
+		if c, ok := adminVerbClass[name]; ok {
+			return c
+		}
+		return VerbUnknown
 	}
 	switch {
 	case strings.HasPrefix(name, "Describe"),

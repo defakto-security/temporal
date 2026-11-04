@@ -41,7 +41,20 @@ jobs:
       # Full config, but only fail on issues in code changed since the base branch.
       # Existing findings are grandfathered; new code must be clean.
       - name: lint (new code)
-        run: mise exec -- golangci-lint run --new-from-rev=origin/${{ github.base_ref || 'main' }} --timeout=10m
+        if: ${{ github.event_name == 'pull_request' }}
+        run: mise exec -- golangci-lint run --new-from-rev=origin/${{ github.base_ref }} --timeout=10m
+
+      - name: lint (push)
+        if: ${{ github.event_name == 'push' }}
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # New branch or force push: the before SHA is all zeros or missing.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            mise exec -- golangci-lint run --timeout=10m
+          else
+            mise exec -- golangci-lint run --new-from-rev="$BEFORE" --timeout=10m
+          fi
 
   all-green:
     needs: [ golang ]
