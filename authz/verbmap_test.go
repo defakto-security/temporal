@@ -18,6 +18,10 @@ func TestVerbClassOf(t *testing.T) {
 		{svc + "SignalWorkflowExecution", VerbStartSignal},
 		{svc + "SignalWithStartWorkflowExecution", VerbStartSignal},
 		{svc + "QueryWorkflow", VerbStartSignal},
+		{svc + "UpdateWorkflowExecution", VerbStartSignal},
+		{svc + "ExecuteMultiOperation", VerbStartSignal},
+		{svc + "GetSystemInfo", VerbReadOnly},
+		{svc + "GetSearchAttributes", VerbReadOnly},
 
 		{svc + "DescribeNamespace", VerbReadOnly},
 		{svc + "ListWorkflowExecutions", VerbReadOnly},

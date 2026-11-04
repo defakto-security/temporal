@@ -42,7 +42,9 @@ jobs:
       # Existing findings are grandfathered; new code must be clean.
       - name: lint (new code)
         if: ${{ github.event_name == 'pull_request' }}
-        run: mise exec -- golangci-lint run --new-from-rev=origin/${{ github.base_ref }} --timeout=10m
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: mise exec -- golangci-lint run --new-from-rev="origin/${BASE_REF}" --timeout=10m
 
       - name: lint (push)
         if: ${{ github.event_name == 'push' }}

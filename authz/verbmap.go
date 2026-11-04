@@ -55,6 +55,11 @@ var exactVerbClass = map[string]VerbClass{
 	"SignalWorkflowExecution":          VerbStartSignal,
 	"SignalWithStartWorkflowExecution": VerbStartSignal,
 	"QueryWorkflow":                    VerbStartSignal,
+	"UpdateWorkflowExecution":          VerbStartSignal,
+	"ExecuteMultiOperation":            VerbStartSignal,
+
+	"GetSystemInfo":       VerbReadOnly,
+	"GetSearchAttributes": VerbReadOnly,
 
 	"TerminateWorkflowExecution":     VerbBreakGlass,
 	"RequestCancelWorkflowExecution": VerbBreakGlass,
