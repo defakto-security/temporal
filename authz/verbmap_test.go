@@ -19,6 +19,10 @@ func TestVerbClassOf(t *testing.T) {
 		{svc + "SignalWithStartWorkflowExecution", VerbStartSignal},
 		{svc + "QueryWorkflow", VerbStartSignal},
 		{svc + "UpdateWorkflowExecution", VerbStartSignal},
+		// PollWorkflowExecutionUpdate polls for an update's result; it is the
+		// read side of UpdateWorkflowExecution, so it must share VerbStartSignal
+		// and NOT fall through the Poll* prefix rule to VerbWorker.
+		{svc + "PollWorkflowExecutionUpdate", VerbStartSignal},
 		{svc + "ExecuteMultiOperation", VerbStartSignal},
 		{svc + "GetSystemInfo", VerbReadOnly},
 		{svc + "GetSearchAttributes", VerbReadOnly},
