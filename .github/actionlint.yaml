@@ -1,0 +1,9 @@
+self-hosted-runner:
+  # RunsOn (runs-on.com) custom runner labels used in workflows.
+  labels:
+    - runs-on=*
+    - runner=*
+    - cpu=*
+    - ram=*
+    - spot=*
+    - volume=*

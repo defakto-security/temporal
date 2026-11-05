@@ -1,0 +1,26 @@
+# Stock Temporal Helm chart values showing the product contract: swap the
+# image to the defakto-spiffe-temporal build, and mount the ConfigMap carrying
+# the trust-domain/issuer config and the Cedar policy. No chart fork.
+#
+#   # Run from the repository root:
+#   helm upgrade --install temporal temporal/temporal -f reference/values.example.yaml
+
+server:
+  image:
+    repository: ghcr.io/defakto-security/temporal
+    # Pin an immutable, commit-specific tag — the publish workflow tags images
+    # as <commit-sha>-<run-id>. Do not use a mutable tag like `latest`.
+    tag: <commit-sha>-<run-id>
+
+  # Mount the ConfigMap (reference/configmap.example.yaml) and point the module
+  # at its config file.
+  additionalVolumes:
+    - name: defakto-spiffe-temporal
+      configMap:
+        name: defakto-spiffe-temporal
+  additionalVolumeMounts:
+    - name: defakto-spiffe-temporal
+      mountPath: /etc/defakto-spiffe-temporal
+  additionalEnv:
+    - name: DEFAKTO_SPIFFE_TEMPORAL_CONFIG
+      value: /etc/defakto-spiffe-temporal/config.yaml
