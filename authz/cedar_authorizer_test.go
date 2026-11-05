@@ -70,7 +70,11 @@ func TestAuthorize_ReferencePolicy(t *testing.T) {
 		{"service read-only denied", authn.RoleClassService, svc + "ListWorkflowExecutions", false},
 		{"service terminate denied", authn.RoleClassService, svc + "TerminateWorkflowExecution", false},
 		{"human read-only allowed", authn.RoleClassHuman, svc + "DescribeNamespace", true},
-		{"human break-glass allowed by policy", authn.RoleClassHuman, svc + "TerminateWorkflowExecution", true},
+		// The reference policy ships the human break-glass permit COMMENTED OUT
+		// (the on-call gate, FRY-1374, is not built), so the shipped default
+		// must DENY break-glass to humans. Re-enable both the permit and this
+		// expectation together once the gate exists.
+		{"human break-glass denied by default policy", authn.RoleClassHuman, svc + "TerminateWorkflowExecution", false},
 		{"human worker denied", authn.RoleClassHuman, svc + "PollActivityTaskQueue", false},
 		{"destruction forbidden for service", authn.RoleClassService, svc + "DeleteWorkflowExecution", false},
 		{"destruction forbidden for human", authn.RoleClassHuman, svc + "DeleteWorkflowExecution", false},
@@ -106,6 +110,19 @@ func TestAuthorize_FailClosed(t *testing.T) {
 
 	// Unknown verb (unclassified API) denies even for an otherwise-allowed role.
 	res, err = a.Authorize(context.Background(), claims(authn.RoleClassService), target(svc+"SomeBrandNewRPC"))
+	require.NoError(t, err)
+	require.Equal(t, authorization.DecisionDeny, res.Decision)
+}
+
+// TestAuthorize_NilCaller guards the unauthenticated path: Temporal invokes the
+// authorizer with caller == nil when a request carries no client cert and no
+// authorization header. This must deny, never panic — on a streaming RPC a
+// panic here would go unrecovered and could crash the frontend.
+func TestAuthorize_NilCaller(t *testing.T) {
+	t.Parallel()
+	a := newTestAuthorizer(t, loadReferencePolicy(t))
+
+	res, err := a.Authorize(context.Background(), nil, target(svc+"StartWorkflowExecution"))
 	require.NoError(t, err)
 	require.Equal(t, authorization.DecisionDeny, res.Decision)
 }

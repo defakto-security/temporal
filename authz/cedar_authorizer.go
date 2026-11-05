@@ -2,11 +2,13 @@ package authz
 
 import (
 	"context"
+	"fmt"
 
 	cedar "github.com/cedar-policy/cedar-go"
 	"github.com/cedar-policy/cedar-go/types"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
 
 	"github.com/defakto-security/temporal/authn"
 	spiffeconfig "github.com/defakto-security/temporal/config"
@@ -16,7 +18,6 @@ import (
 // the shape the reference policy.cedar is written against.
 const (
 	entityRoleClass types.EntityType = "RoleClass"
-	entityVerbClass types.EntityType = "VerbClass"
 	entityNamespace types.EntityType = "Namespace"
 	actionAccess    types.EntityType = "Action"
 )
@@ -48,6 +49,17 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 		return deny("no policy loaded"), nil
 	}
 
+	// Temporal invokes the authorizer even for an unauthenticated call: when a
+	// request carries no client certificate and no authorization header,
+	// GetAuthInfo returns nil and the frontend passes caller == nil here. A
+	// bare type assertion on caller.Extensions would then panic — and on a
+	// STREAMING RPC (e.g. AdminService/StreamWorkflowReplicationMessages) no
+	// interceptor recovers it, so an anonymous caller could crash the frontend.
+	// Fail closed on nil instead.
+	if caller == nil {
+		return deny("unauthenticated"), nil
+	}
+
 	roleClass, ok := caller.Extensions.(authn.RoleClass)
 	if !ok || roleClass == authn.RoleClassUnknown {
 		return deny("unknown role class"), nil
@@ -64,7 +76,18 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 		Resource:  cedar.NewEntityUID(entityNamespace, types.String(target.Namespace)),
 	}
 
-	decision, _ := cedar.Authorize(ps, types.EntityMap{}, req)
+	// Cedar SKIPS any policy whose condition errors during evaluation. With an
+	// empty entity map and no context, a customer forbid guarded by
+	// `when { principal.x }` or `context.*` errors and is dropped — so a
+	// broader permit could win where a deny was intended. Treat any evaluation
+	// error as fail-closed: deny and log it, never silently ignore it.
+	decision, diag := cedar.Authorize(ps, types.EntityMap{}, req)
+	if len(diag.Errors) > 0 {
+		a.logger.Error("cedar policy evaluation error; denying",
+			tag.NewStringTag("apiName", target.APIName),
+			tag.NewStringTag("diagnostics", fmt.Sprintf("%v", diag.Errors)))
+		return deny("policy evaluation error"), nil
+	}
 	if decision == cedar.Allow {
 		return authorization.Result{Decision: authorization.DecisionAllow}, nil
 	}

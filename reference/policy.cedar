@@ -26,16 +26,20 @@ permit (
   resource
 );
 
-// break-glass (Terminate / RequestCancel / Reset) is granted to humans here.
-// NOTE: the on-call-grant gate (FRY-1374) is NOT implemented yet — the
-// authorizer does not check on-call status before consulting Cedar, so this
-// permit currently grants break-glass to any human. Until FRY-1374 lands, this
-// is the only control on break-glass.
-permit (
-  principal == RoleClass::"human",
-  action == Action::"break-glass",
-  resource
-);
+// break-glass (Terminate / RequestCancel / Reset) for humans.
+//
+// SHIPPED DISABLED ON PURPOSE. The on-call-grant gate (FRY-1374) is not built
+// yet: the authorizer does not check on-call status before consulting Cedar,
+// so an active permit here grants destructive break-glass to EVERY human in
+// EVERY namespace with no incident binding, expiry, or approval. The reference
+// default must not do that. Uncomment this permit only once an on-call gate
+// (or an equivalent scoping condition) is in place.
+//
+// permit (
+//   principal == RoleClass::"human",
+//   action == Action::"break-glass",
+//   resource
+// );
 
 // --- floor (customer-editable) ---------------------------------------------
 // Destruction / shard-admin verbs: forbidden to everyone by default.

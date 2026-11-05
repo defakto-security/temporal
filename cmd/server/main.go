@@ -14,6 +14,7 @@ package main
 import (
 	stdlog "log"
 	"os"
+	"strings"
 
 	// Persistence plugins the stock server loads; a custom main must import
 	// them itself or the server cannot open its datastore.
@@ -30,6 +31,13 @@ import (
 	"github.com/defakto-security/temporal/authz"
 	spiffeconfig "github.com/defakto-security/temporal/config"
 )
+
+// EnvServices names the env var selecting which Temporal services this process
+// runs, as a comma-separated list (e.g. "frontend,history,matching,worker").
+// It mirrors the stock server's TEMPORAL_SERVICES input; unset means run the
+// default set. The stock Helm chart sets this per role, so a custom main MUST
+// honor it or every pod runs every service.
+const EnvServices = "TEMPORAL_SERVICES"
 
 func main() {
 	if err := run(); err != nil {
@@ -55,6 +63,11 @@ func run() error {
 	}
 
 	s, err := temporal.NewServer(
+		// Without ForServices the server starts NO services (upstream skips any
+		// service not named), so the process would run no frontend/history/
+		// matching/worker and silently idle. Honor TEMPORAL_SERVICES as the
+		// stock image does, defaulting to the full set.
+		temporal.ForServices(servicesToStart()),
 		temporal.WithConfigLoader(
 			temporalConfigDir(),
 			os.Getenv(config.EnvKeyEnvironment),
@@ -82,4 +95,25 @@ func temporalConfigDir() string {
 		return dir
 	}
 	return "config"
+}
+
+// servicesToStart returns the service names this process should run. It reads
+// EnvServices as a comma-separated list, trimming blanks, and falls back to
+// temporal.DefaultServices (frontend, history, matching, worker) when unset or
+// empty — matching the stock server's --service/TEMPORAL_SERVICES behavior.
+func servicesToStart() []string {
+	raw := os.Getenv(EnvServices)
+	if strings.TrimSpace(raw) == "" {
+		return temporal.DefaultServices
+	}
+	var names []string
+	for part := range strings.SplitSeq(raw, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return temporal.DefaultServices
+	}
+	return names
 }
