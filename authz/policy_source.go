@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	cedar "github.com/cedar-policy/cedar-go"
+	"github.com/cedar-policy/cedar-go/x/exp/ast"
 	"github.com/fsnotify/fsnotify"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
@@ -55,7 +56,33 @@ func (s *policySource) reload() error {
 	if err != nil {
 		return fmt.Errorf("parsing policy %q: %w", s.path, err)
 	}
+	if err := rejectLegacyPrincipalScopes(ps); err != nil {
+		return fmt.Errorf("policy %q: %w", s.path, err)
+	}
 	s.current.Store(ps)
+	return nil
+}
+
+// rejectLegacyPrincipalScopes refuses a policy whose principal scope is
+// `== RoleClass::"x"` or `is RoleClass`. The principal is a Workload entity, so
+// such a policy never matches: a permit becomes a silent outage and a forbid
+// silently stops forbidding. Fail at load with the fix spelled out instead.
+func rejectLegacyPrincipalScopes(ps *cedar.PolicySet) error {
+	for id, p := range ps.All() {
+		var legacy bool
+		switch sc := p.AST().Principal.(type) {
+		case ast.ScopeTypeEq:
+			legacy = sc.Entity.Type == entityRoleClass
+		case ast.ScopeTypeIs:
+			legacy = sc.Type == entityRoleClass
+		case ast.ScopeTypeIsIn:
+			legacy = sc.Type == entityRoleClass
+		}
+		if legacy {
+			return fmt.Errorf("policy %s scopes the principal to a RoleClass with == or is; "+
+				"the principal is now a Workload, so use `principal in RoleClass::\"<class>\"`", id)
+		}
+	}
 	return nil
 }
 

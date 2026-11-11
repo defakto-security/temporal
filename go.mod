@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	github.com/cedar-policy/cedar-go v1.8.0
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/spiffe/go-spiffe/v2 v2.9.0
 	github.com/stretchr/testify v1.12.1
 	go.temporal.io/api v1.63.5
 	go.temporal.io/server v1.32.1
@@ -144,7 +145,6 @@ require (
 	github.com/sony/gobreaker v1.0.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/spiffe/go-spiffe/v2 v2.9.0 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/temporalio/ringpop-go v0.1.0 // indirect
 	github.com/temporalio/sqlparser v0.1.0 // indirect

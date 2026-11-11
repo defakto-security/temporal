@@ -16,15 +16,25 @@ data:
       issuer: https://devportal.corp.defakto.security/
       audience: temporal
       jwksURL: https://devportal.corp.defakto.security/.well-known/jwks.json
+    # Principal attributes a policy can read as `principal.<name>`. Defaults
+    # (shown) parse spiffe://<td>/ns/<ns>/sa/<sa>. Add your own, or override a
+    # default by reusing its name. Each value is an RE2 regex with exactly ONE
+    # capture group. A pattern is anchored at both ends and must match the WHOLE
+    # SPIFFE ID (use `.*` for the parts you ignore). No match gives "".
+    # attributes:
+    #   trust_domain: 'spiffe://([^/]+)/.*'
+    #   ns:           'spiffe://[^/]+/ns/([^/]+)/sa/[^/]+'
+    #   sa:           'spiffe://[^/]+/ns/[^/]+/sa/([^/]+)'
+    #   nameSpace:    'spiffe://[^/]+/k8s/([^/]+)/.*'
     policyPath: /etc/defakto-spiffe-temporal/policy.cedar
 
   # The customer-owned Cedar policy. This copy is the shipped reference
   # (destruction verbs forbidden by default); edit to set your own floor.
   policy.cedar: |
-    permit (principal == RoleClass::"service",
+    permit (principal in RoleClass::"service",
             action in [Action::"start-signal", Action::"worker"], resource);
-    permit (principal == RoleClass::"human",
+    permit (principal in RoleClass::"human",
             action == Action::"read-only", resource);
-    permit (principal == RoleClass::"human",
+    permit (principal in RoleClass::"human",
             action == Action::"break-glass", resource);
     forbid (principal, action == Action::"forbidden-all", resource);
