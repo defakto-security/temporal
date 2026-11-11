@@ -12,6 +12,7 @@
 package main
 
 import (
+	"fmt"
 	stdlog "log"
 	"os"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/temporal"
 
 	"github.com/defakto-security/temporal/authn"
@@ -64,6 +66,17 @@ func run() error {
 		return err
 	}
 
+	// The server builds its metrics handler from the Temporal config AFTER the
+	// authorizer is constructed, so the authorizer cannot borrow it. Build it
+	// here, the same way the server would, and hand the one instance to both:
+	// decision counters then appear on the server's own metrics endpoint.
+	metricsHandler, err := temporalMetricsHandler(logger)
+	if err != nil {
+		return err
+	}
+	authorizer.WithMetrics(metricsHandler)
+	defer func() { _ = authorizer.Close() }()
+
 	s, err := temporal.NewServer(
 		// Without ForServices the server starts NO services (upstream skips any
 		// service not named), so the process would run no frontend/history/
@@ -76,6 +89,7 @@ func run() error {
 			os.Getenv(config.EnvKeyAvailabilityZone),
 		),
 		temporal.WithLogger(logger),
+		temporal.WithCustomMetricsHandler(metricsHandler),
 		temporal.WithAuthorizer(authorizer),
 		temporal.WithClaimMapper(func(*config.Config) authorization.ClaimMapper {
 			return authn.NewClaimMapper(appCfg, logger)
@@ -90,6 +104,20 @@ func run() error {
 	}
 	<-temporal.InterruptCh()
 	return s.Stop()
+}
+
+// temporalMetricsHandler builds the metrics handler from Temporal's own config
+// (global.metrics), exactly as the server does when none is supplied.
+func temporalMetricsHandler(logger log.Logger) (metrics.Handler, error) {
+	cfg, err := config.Load(
+		config.WithConfigDir(temporalConfigDir()),
+		config.WithEnv(os.Getenv(config.EnvKeyEnvironment)),
+		config.WithZone(os.Getenv(config.EnvKeyAvailabilityZone)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading temporal config for metrics: %w", err)
+	}
+	return metrics.MetricsHandlerFromConfig(logger, cfg.Global.Metrics)
 }
 
 // temporalConfigDir returns the Temporal config directory.
