@@ -26,6 +26,21 @@ const PluginPGX = "postgres12_pgx"
 
 const pgxDriverName = "pgx"
 
+// pingTimeout bounds the first connection, so a stalled handshake cannot hold
+// up startup (or a reconnect) forever.
+const pingTimeout = 30 * time.Second
+
+// reservedAttrs are libpq/pgx settings that connectAttributes must not set:
+// they would redirect the connection, change the identity the token was signed
+// for, or bypass the cached token.
+var reservedAttrs = map[string]bool{
+	"host": true, "hostaddr": true, "port": true, "user": true, "password": true,
+	"dbname": true, "database": true, "service": true, "passfile": true, "servicefile": true,
+}
+
+// attrKey normalizes a connectAttributes key the way pgx matches settings.
+func attrKey(k string) string { return strings.ToLower(strings.TrimSpace(k)) }
+
 // Manager owns one TokenSource per (endpoint, user) and builds Temporal SQL
 // connections that read from them. Temporal may call Connect again after a
 // failover; sharing sources keeps that from starting more refresh loops.
@@ -111,8 +126,13 @@ func checkStore(c *config.SQL) error {
 		// server whose certificate was not checked.
 		errs = append(errs, errors.New("tls.enableHostVerification must be true and tls.caFile set (the RDS CA bundle)"))
 	}
-	if mode, ok := c.ConnectAttributes["sslmode"]; ok && strings.TrimSpace(mode) != "verify-full" {
-		errs = append(errs, fmt.Errorf("connectAttributes.sslmode %q is not allowed; IAM auth always uses verify-full", mode))
+	for k, v := range c.ConnectAttributes {
+		switch key := attrKey(k); {
+		case reservedAttrs[key]:
+			errs = append(errs, fmt.Errorf("connectAttributes.%s is not allowed with IAM auth", strings.TrimSpace(k)))
+		case key == "sslmode" && strings.TrimSpace(v) != "verify-full":
+			errs = append(errs, fmt.Errorf("connectAttributes.sslmode %q is not allowed; IAM auth always uses verify-full", v))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -155,7 +175,9 @@ func (m *Manager) Connect(c *config.SQL) (*sqlx.DB, error) {
 		return nil, err
 	}
 	db := sqlx.NewDb(sql.OpenDB(&connector{base: base, src: src}), pgxDriverName)
-	if err := db.PingContext(ctx); err != nil {
+	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -178,6 +200,9 @@ func (m *Manager) Connect(c *config.SQL) (*sqlx.DB, error) {
 func pgxConfig(c *config.SQL) (*pgx.ConnConfig, error) {
 	attrs := url.Values{}
 	for k, v := range c.ConnectAttributes {
+		if reservedAttrs[attrKey(k)] {
+			return nil, fmt.Errorf("connectAttributes.%s is not allowed with IAM auth", strings.TrimSpace(k))
+		}
 		attrs.Set(strings.TrimSpace(k), strings.TrimSpace(v))
 	}
 	// Always verify the server certificate; checkStore rejects other modes.

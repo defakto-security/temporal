@@ -167,14 +167,17 @@ func TestApplyRejectsUnsafeStores(t *testing.T) {
 	require.NoError(t, m.Apply(mk(func(*config.SQL) {})))
 
 	for name, mut := range map[string]func(*config.SQL){
-		"pq plugin":    func(s *config.SQL) { s.PluginName = "postgres12" },
-		"password set": func(s *config.SQL) { s.Password = "x" },
-		"no tls":       func(s *config.SQL) { s.TLS = nil },
-		"no verify":    func(s *config.SQL) { s.TLS.EnableHostVerification = false },
-		"no ca file":   func(s *config.SQL) { s.TLS.CaFile = "" },
-		"sslmode off":  func(s *config.SQL) { s.ConnectAttributes = map[string]string{"sslmode": "disable"} },
-		"no port":      func(s *config.SQL) { s.ConnectAddr = "db.example" },
-		"no user":      func(s *config.SQL) { s.User = "" },
+		"pq plugin":     func(s *config.SQL) { s.PluginName = "postgres12" },
+		"password set":  func(s *config.SQL) { s.Password = "x" },
+		"no tls":        func(s *config.SQL) { s.TLS = nil },
+		"no verify":     func(s *config.SQL) { s.TLS.EnableHostVerification = false },
+		"no ca file":    func(s *config.SQL) { s.TLS.CaFile = "" },
+		"sslmode off":   func(s *config.SQL) { s.ConnectAttributes = map[string]string{"sslmode": "disable"} },
+		"host override": func(s *config.SQL) { s.ConnectAttributes = map[string]string{" Host ": "evil"} },
+		"user override": func(s *config.SQL) { s.ConnectAttributes = map[string]string{"USER": "root"} },
+		"port override": func(s *config.SQL) { s.ConnectAttributes = map[string]string{"port": "1"} },
+		"no port":       func(s *config.SQL) { s.ConnectAddr = "db.example" },
+		"no user":       func(s *config.SQL) { s.User = "" },
 	} {
 		require.Error(t, m.Apply(mk(mut)), name)
 	}
@@ -239,4 +242,13 @@ func TestManagerRejectsAfterClose(t *testing.T) {
 	m.Close()
 	_, err := m.source(t.Context(), "db:5432", "u")
 	require.ErrorContains(t, err, "closed")
+}
+
+func TestPgxConfigRejectsReservedAttrs(t *testing.T) {
+	t.Parallel()
+	s := validSQL()
+	s.TLS.CaFile = writeCA(t)
+	s.ConnectAttributes = map[string]string{"dbname": "other"}
+	_, err := pgxConfig(s)
+	require.ErrorContains(t, err, "not allowed")
 }
