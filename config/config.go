@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -58,6 +59,10 @@ type Config struct {
 	// match the caller's whole SPIFFE ID (add `.*` for the parts you ignore);
 	// the captured text is the attribute value, or "" when it does not match. A name that equals a default (trust_domain, ns, sa) replaces it.
 	Attributes map[string]string `yaml:"attributes"`
+
+	// DatabaseIAM turns on RDS IAM authentication for Temporal's Postgres
+	// stores (IRSA, no stored password). Off by default.
+	DatabaseIAM DatabaseIAMConfig `yaml:"databaseIAM"`
 
 	// PolicyPath is the filesystem path to the customer-owned Cedar policy,
 	// mounted from the ConfigMap. The authorizer loads, validates, and
@@ -103,6 +108,19 @@ const (
 	DecisionLogAll  = "all"
 )
 
+// DatabaseIAMConfig configures RDS IAM database authentication. When enabled,
+// every SQL store in Temporal's own config must use pluginName postgres12_pgx,
+// have TLS on, and leave password unset.
+type DatabaseIAMConfig struct {
+	// Enabled switches IAM auth on.
+	Enabled bool `yaml:"enabled"`
+	// Region is the RDS region. Empty means the AWS_REGION env var.
+	Region string `yaml:"region"`
+	// RefreshInterval is how often a new token is signed in the background.
+	// A token lasts 15 minutes. Default 10m; at most 14m.
+	RefreshInterval time.Duration `yaml:"refreshInterval"`
+}
+
 // HumanTokenConfig carries the parameters for verifying portal-issued OIDC
 // tokens (Milestone 2). forwardHeaders is transport, not trust: the frontend
 // must verify signature/issuer/audience/expiry against the portal JWKS.
@@ -146,6 +164,9 @@ func (c *Config) applyDefaults() {
 	if c.DecisionLog == "" {
 		c.DecisionLog = DecisionLogOff
 	}
+	if c.DatabaseIAM.Enabled && c.DatabaseIAM.RefreshInterval == 0 {
+		c.DatabaseIAM.RefreshInterval = 10 * time.Minute
+	}
 }
 
 // Validate checks the required invariants of the config contract.
@@ -175,6 +196,9 @@ func (c *Config) Validate() error {
 	}
 	if _, err := c.AttributeRules(); err != nil {
 		errs = append(errs, err)
+	}
+	if iam := c.DatabaseIAM; iam.Enabled && (iam.RefreshInterval <= 0 || iam.RefreshInterval > 14*time.Minute) {
+		errs = append(errs, errors.New("databaseIAM.refreshInterval must be between 0 and 14m (tokens last 15m)"))
 	}
 	return errors.Join(errs...)
 }

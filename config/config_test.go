@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -69,4 +70,21 @@ func TestLoad_Attributes(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, rules, "nameSpace")
 	require.Contains(t, rules, "ns", "defaults kept")
+}
+
+// TestLoad_DatabaseIAM checks the databaseIAM defaults and bounds.
+func TestLoad_DatabaseIAM(t *testing.T) {
+	t.Parallel()
+	base := "version: 1\ntrustDomain: x\npolicyPath: /p\n"
+
+	cfg, err := Load(writeConfig(t, base+"databaseIAM:\n  enabled: true\n"))
+	require.NoError(t, err)
+	require.Equal(t, 10*time.Minute, cfg.DatabaseIAM.RefreshInterval, "default interval")
+
+	cfg, err = Load(writeConfig(t, base))
+	require.NoError(t, err)
+	require.False(t, cfg.DatabaseIAM.Enabled, "off by default")
+
+	_, err = Load(writeConfig(t, base+"databaseIAM:\n  enabled: true\n  refreshInterval: 15m\n"))
+	require.ErrorContains(t, err, "refreshInterval")
 }
