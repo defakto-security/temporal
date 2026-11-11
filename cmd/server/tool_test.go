@@ -19,9 +19,16 @@ func TestRunTool_NotSelected(t *testing.T) {
 	}
 }
 
-// TestRunTool_SignsRequests runs the tool against a local stand-in for
-// OpenSearch and checks the request carries a SigV4 signature for "es".
-func TestRunTool_SignsRequests(t *testing.T) {
+// TestRunTool_PingIsSigned is a SigV4 wiring test, not an OpenSearch or IRSA
+// integration test. It runs `ping` against a local stand-in and checks the
+// request carries a signature for "es" in the region from AWS_REGION. It does
+// not run setup-schema or create-index. If ping fails, the upstream tool exits
+// the test binary with status 1, so a failure here shows as a package failure.
+func TestRunTool_PingIsSigned(t *testing.T) {
+	// The tool reads these as flag defaults; keep the host's out of the test.
+	for _, k := range []string{"ES_SERVER", "ES_USER", "ES_PWD", "AWS_CREDENTIALS", "AWS_SESSION_TOKEN", "ES_VISIBILITY_INDEX"} {
+		t.Setenv(k, "")
+	}
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	t.Setenv("AWS_REGION", "us-east-2")

@@ -52,6 +52,7 @@ const EnvServices = "TEMPORAL_SERVICES"
 func main() {
 	if ran, err := runTool(os.Args); ran {
 		if err != nil {
+			stdlog.Printf("defakto-spiffe-temporal: %s: %v", CmdElasticsearchTool, err)
 			os.Exit(1)
 		}
 		return

@@ -6,13 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/persistence/visibility/store/elasticsearch/client"
-	"go.yaml.in/yaml/v3"
 )
 
 // TestSigV4Config checks Temporal's own aws-request-signing support, as the
@@ -68,19 +68,20 @@ func TestSigV4UnknownProvider(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestReferenceConfig_Visibility loads the shipped reference config the way
-// Temporal does and checks the visibility store is OpenSearch with IRSA
-// signing, and that the whole persistence block passes Temporal's validation.
+// TestReferenceConfig_Visibility loads the shipped reference through
+// Temporal's own config loader (base.yaml in a config directory), then checks
+// the visibility store is OpenSearch with IRSA signing. The loader runs
+// Temporal's validation, which checks the stores exist and that the index name
+// is set. It does not contact OpenSearch.
 func TestReferenceConfig_Visibility(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile("../reference/temporal-visibility.example.yaml")
 	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "base.yaml"), raw, 0o600))
 
-	var cfg struct {
-		Persistence config.Persistence `yaml:"persistence"`
-	}
-	require.NoError(t, yaml.Unmarshal(raw, &cfg))
-	require.NoError(t, cfg.Persistence.Validate())
+	cfg, err := config.Load(config.WithConfigDir(dir), config.WithEnv("development"))
+	require.NoError(t, err)
 
 	require.Equal(t, "es-visibility", cfg.Persistence.VisibilityStore)
 	es := cfg.Persistence.DataStores["es-visibility"].Elasticsearch
