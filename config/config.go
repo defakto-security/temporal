@@ -117,9 +117,13 @@ type DatabaseIAMConfig struct {
 	// Region is the RDS region. Empty means the AWS_REGION env var.
 	Region string `yaml:"region"`
 	// RefreshInterval is how often a new token is signed in the background.
-	// A token lasts 15 minutes. Default 10m; at most 14m.
+	// A token lasts 15 minutes. Default 10m; at least MinRefreshInterval; at most 14m.
 	RefreshInterval time.Duration `yaml:"refreshInterval"`
 }
+
+// MinRefreshInterval is the shortest allowed databaseIAM.refreshInterval.
+// Shorter values would hammer STS/credential providers for no benefit.
+const MinRefreshInterval = 30 * time.Second
 
 // HumanTokenConfig carries the parameters for verifying portal-issued OIDC
 // tokens (Milestone 2). forwardHeaders is transport, not trust: the frontend
@@ -197,8 +201,8 @@ func (c *Config) Validate() error {
 	if _, err := c.AttributeRules(); err != nil {
 		errs = append(errs, err)
 	}
-	if iam := c.DatabaseIAM; iam.Enabled && (iam.RefreshInterval <= 0 || iam.RefreshInterval > 14*time.Minute) {
-		errs = append(errs, errors.New("databaseIAM.refreshInterval must be between 0 and 14m (tokens last 15m)"))
+	if iam := c.DatabaseIAM; iam.Enabled && (iam.RefreshInterval < MinRefreshInterval || iam.RefreshInterval > 14*time.Minute) {
+		errs = append(errs, errors.New("databaseIAM.refreshInterval must be between 30s and 14m (tokens last 15m)"))
 	}
 	return errors.Join(errs...)
 }

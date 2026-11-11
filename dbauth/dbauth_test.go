@@ -91,6 +91,10 @@ func TestTokenIsServedFromCache(t *testing.T) {
 	require.Equal(t, before, creds.calls.Load(), "Token() must not touch credentials")
 }
 
+var realMinRefresh = minRefreshInterval
+
+func init() { minRefreshInterval = time.Millisecond }
+
 func TestRefreshLoopRenewsToken(t *testing.T) {
 	t.Parallel()
 	creds := &countingCreds{}
@@ -145,6 +149,12 @@ func TestOptionsValidation(t *testing.T) {
 	t.Parallel()
 	_, err := NewTokenSource(t.Context(), Options{RefreshInterval: 20 * time.Minute})
 	require.Error(t, err)
+	// Below the floor is rejected too, when the test override is off.
+	old := minRefreshInterval
+	minRefreshInterval = realMinRefresh
+	t.Cleanup(func() { minRefreshInterval = old })
+	_, err = NewTokenSource(t.Context(), Options{RefreshInterval: time.Second})
+	require.ErrorContains(t, err, "at least")
 }
 
 func validSQL() *config.SQL {

@@ -16,7 +16,13 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/rds/auth"
+
+	"github.com/defakto-security/temporal/config"
 )
+
+// minRefreshInterval is the shortest accepted refresh interval. A var so
+// tests can shorten it; never changed in production code.
+var minRefreshInterval = config.MinRefreshInterval
 
 const (
 	// TokenLifetime is how long RDS accepts a token (a fixed 15 minutes).
@@ -105,9 +111,9 @@ func (o Options) validate() error {
 	if o.Credentials == nil {
 		errs = append(errs, errors.New("credentials are required"))
 	}
-	if o.RefreshInterval <= 0 || o.RefreshInterval >= TokenLifetime-expiryMargin {
-		errs = append(errs, fmt.Errorf("refresh interval %s must be positive and shorter than %s",
-			o.RefreshInterval, TokenLifetime-expiryMargin))
+	if o.RefreshInterval < minRefreshInterval || o.RefreshInterval >= TokenLifetime-expiryMargin {
+		errs = append(errs, fmt.Errorf("refresh interval %s must be at least %s and shorter than %s",
+			o.RefreshInterval, minRefreshInterval, TokenLifetime-expiryMargin))
 	}
 	return errors.Join(errs...)
 }
@@ -146,7 +152,7 @@ func (t *TokenSource) loop(ctx context.Context) {
 				t.opts.OnError(err)
 			}
 			// Keep the old token and retry soon; it stays valid until expiry.
-			wait = min(retryInterval, t.opts.RefreshInterval)
+			wait = retryInterval
 			continue
 		}
 		wait = t.nextWait()

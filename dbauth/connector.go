@@ -130,6 +130,11 @@ func checkStore(c *config.SQL) error {
 		switch key := attrKey(k); {
 		case reservedAttrs[key]:
 			errs = append(errs, fmt.Errorf("connectAttributes.%s is not allowed with IAM auth", strings.TrimSpace(k)))
+		case key == "sslrootcert" && c.TLS != nil && strings.TrimSpace(v) != c.TLS.CaFile,
+			key == "sslcert" && c.TLS != nil && strings.TrimSpace(v) != c.TLS.CertFile,
+			key == "sslkey" && c.TLS != nil && strings.TrimSpace(v) != c.TLS.KeyFile,
+			key == "sslpassword", key == "sslinline":
+			errs = append(errs, fmt.Errorf("connectAttributes.%s conflicts with the tls settings; set it under tls", strings.TrimSpace(k)))
 		case key == "sslmode" && strings.TrimSpace(v) != "verify-full":
 			errs = append(errs, fmt.Errorf("connectAttributes.sslmode %q is not allowed; IAM auth always uses verify-full", v))
 		}
@@ -207,7 +212,7 @@ func pgxConfig(c *config.SQL) (*pgx.ConnConfig, error) {
 	}
 	// Always verify the server certificate; checkStore rejects other modes.
 	attrs.Set("sslmode", "verify-full")
-	if c.TLS.CaFile != "" && attrs.Get("sslrootcert") == "" {
+	if c.TLS.CaFile != "" {
 		attrs.Set("sslrootcert", c.TLS.CaFile)
 	}
 	if (c.TLS.CertFile == "") != (c.TLS.KeyFile == "") {

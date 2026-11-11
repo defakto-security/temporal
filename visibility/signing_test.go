@@ -5,6 +5,7 @@ package visibility
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"testing"
 
@@ -20,10 +21,14 @@ import (
 func TestSigV4Config(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "credentials"))
 
-	var got http.Header
+	gotCh := make(chan http.Header, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Clone()
+		gotCh <- r.Header.Clone()
 	}))
 	defer srv.Close()
 
@@ -39,8 +44,9 @@ func TestSigV4Config(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 
+	got := <-gotCh
 	auth := got.Get("Authorization")
-	require.Regexp(t, regexp.MustCompile(`^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/\d{8}/us-east-2/es/aws4_request`), auth)
+	require.Regexp(t, regexp.MustCompile(`^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/\d{8}/us-east-2/es/aws4_request, SignedHeaders=[a-z0-9;-]+, Signature=[0-9a-f]{64}$`), auth)
 	require.NotEmpty(t, got.Get("X-Amz-Date"))
 }
 
