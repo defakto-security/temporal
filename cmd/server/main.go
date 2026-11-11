@@ -50,6 +50,13 @@ const EnvServices = "TEMPORAL_SERVICES"
 
 // main runs the server and exits non-zero on error.
 func main() {
+	if ran, err := runTool(os.Args); ran {
+		if err != nil {
+			stdlog.Printf("defakto-spiffe-temporal: %s: %v", CmdElasticsearchTool, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		stdlog.Fatalf("defakto-spiffe-temporal: %v", err)
 	}
