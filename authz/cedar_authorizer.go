@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/primitives"
 
 	"github.com/defakto-security/temporal/authn"
 	spiffeconfig "github.com/defakto-security/temporal/config"
@@ -60,6 +61,9 @@ const (
 	decisionAllow     = "allow"
 	decisionDeny      = "deny"
 	decisionWouldDeny = "would_deny"
+	// shadowDelta is the shadow_decision metric value when the candidate policy
+	// disagrees with the live one.
+	shadowDelta = "delta"
 	// would_allow: the live policy denied, the candidate would allow.
 	decisionWouldAllow = "would_allow"
 
@@ -123,7 +127,10 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 // WithMetrics sets the handler that receives decision counters. The default is
 // a no-op.
 func (a *CedarAuthorizer) WithMetrics(h metrics.Handler) *CedarAuthorizer {
-	a.metrics = h
+	// The authorizer only runs in the frontend. Temporal tags each service's own
+	// handler with service_name; this one is the untagged root, so tag it here to
+	// line up with Temporal's own authorization metrics.
+	a.metrics = h.WithTags(metrics.ServiceNameTag(primitives.FrontendService))
 	return a
 }
 
@@ -164,7 +171,7 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 	// (forbidden-all, break-glass) stay denied, so a caller never gains those
 	// by dropping its credential.
 	if a.observeIdentity && d.identityFailure && !alwaysDenied(VerbClassOf(target.APIName)) {
-		d.divergence = decisionWouldDeny
+		d.forgiven = true
 		d.decision = decisionAllow
 		res = authorization.Result{Decision: authorization.DecisionAllow}
 	}
@@ -274,39 +281,53 @@ func (a *CedarAuthorizer) runShadow(d *decisionRecord, liveAllowed bool) {
 			tag.NewStringTag("apiName", d.apiName),
 			tag.NewStringTag("diagnostics", evalErr))
 	case liveAllowed && !allowed:
-		d.divergence = decisionWouldDeny
+		d.shadowDelta = decisionWouldDeny
 	case !liveAllowed && allowed:
-		d.divergence = decisionWouldAllow
+		d.shadowDelta = decisionWouldAllow
 	}
 }
 
 // record logs and counts one decision.
 func (a *CedarAuthorizer) record(d *decisionRecord) {
-	a.count(d.decision, d)
-	if d.divergence != "" {
-		a.count(d.divergence, d)
-		// Always logged: a divergence is the signal shadow mode exists to give.
-		a.logger.Warn("authz decision", d.tags(d.divergence)...)
+	a.count(d)
+	// Always logged: a disagreement is the signal shadow and observe mode exist
+	// to give. The metric carries the same fact as shadow_decision="delta" or a
+	// decision="allow" with an identity reason.
+	switch {
+	case d.shadowDelta != "":
+		a.logger.Warn("authz divergence", d.tags(d.shadowDelta)...)
+	case d.forgiven:
+		a.logger.Warn("authz divergence", d.tags(decisionWouldDeny)...)
 	}
 	switch a.decisionLog {
 	case spiffeconfig.DecisionLogAll:
-		a.logger.Info("authz decision", d.tags(d.decision)...)
+		a.logger.Info("authz decision", d.tags("")...)
 	case spiffeconfig.DecisionLogDeny:
 		if d.decision == decisionDeny {
-			a.logger.Info("authz decision", d.tags(d.decision)...)
+			a.logger.Info("authz decision", d.tags("")...)
 		}
 	}
 }
 
-// count increments the decision counter. Tags are bounded: decision, verb
-// class (a closed set) and namespace (operator-created, small).
-func (a *CedarAuthorizer) count(decision string, d *decisionRecord) {
+// count increments the decision counter once per call. decision is the live
+// outcome. shadow_decision equals it unless the candidate policy disagrees, in
+// which case it is "delta"; the direction follows from decision (live allow plus
+// delta is would_deny). A call forgiven by identityMode=observe is
+// decision="allow" with the identity failure as reason. Tags are bounded:
+// decision, shadow_decision, verb class and reason are closed sets, and
+// namespace is capped (see namespaceTag).
+func (a *CedarAuthorizer) count(d *decisionRecord) {
 	verb := d.verb
 	if verb == "" {
 		verb = "none"
 	}
+	shadow := d.decision
+	if d.shadowDelta != "" {
+		shadow = shadowDelta
+	}
 	a.metrics.Counter(metricDecisions).Record(1,
-		metrics.StringTag("decision", decision),
+		metrics.StringTag("decision", d.decision),
+		metrics.StringTag("shadow_decision", shadow),
 		metrics.StringTag("verb", verb),
 		metrics.StringTag("reason", d.reasonCode()),
 		metrics.NamespaceTag(a.namespaceTag(d)))
@@ -339,7 +360,10 @@ type decisionRecord struct {
 	// identity check that failed.
 	code            string
 	identityFailure bool
-	divergence      string // would_deny, would_allow, or ""
+	// shadowDelta is would_deny or would_allow when the candidate disagreed.
+	shadowDelta string
+	// forgiven marks a pre-policy identity failure that observe mode allowed.
+	forgiven bool
 
 	// req and entities are kept so the shadow policy sees the same input.
 	req      *cedar.Request
@@ -352,9 +376,17 @@ func (d *decisionRecord) fail(code, reason string, identity bool) authorization.
 	return authorization.Result{Decision: authorization.DecisionDeny, Reason: reason}
 }
 
-func (d *decisionRecord) tags(decision string) []tag.Tag {
+// tags builds the log fields. divergence is would_deny or would_allow on a
+// divergence line and "" otherwise.
+func (d *decisionRecord) tags(divergence string) []tag.Tag {
+	shadow := d.decision
+	if d.shadowDelta != "" {
+		shadow = shadowDelta
+	}
 	return []tag.Tag{
-		tag.NewStringTag("decision", decision),
+		tag.NewStringTag("decision", d.decision),
+		tag.NewStringTag("shadowDecision", shadow),
+		tag.NewStringTag("divergence", divergence),
 		tag.NewStringTag("principal", d.subject),
 		tag.NewStringTag("roleClass", d.roleClass),
 		tag.NewAnyTag("attributes", d.attributes),

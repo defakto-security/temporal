@@ -67,7 +67,8 @@ type Config struct {
 	// ShadowPolicyPath is an optional candidate Cedar policy. When set, every
 	// call is also evaluated against the candidate; the live decision is still
 	// the one enforced. Disagreements are logged: would_deny (live allowed,
-	// candidate denies) and would_allow (live denied, candidate allows). Used to test a narrower policy before it
+	// candidate denies) and would_allow (live denied, candidate allows). In the
+	// metric, a disagreement is shadow_decision="delta". Used to test a narrower policy before it
 	// replaces the live one. Empty disables shadow mode.
 	ShadowPolicyPath string `yaml:"shadowPolicyPath"`
 
@@ -79,7 +80,8 @@ type Config struct {
 	// IdentityMode controls the checks that run before any policy: a caller
 	// must be authenticated, have a role class, and present a canonical SPIFFE
 	// ID in TrustDomain. "enforce" (default) denies a call that fails them.
-	// "observe" allows it anyway and logs and counts it as would_deny with the
+	// "observe" allows it anyway, logs it as would_deny, and counts it as
+	// decision="allow" with the
 	// reason, so you can find callers without a valid identity before turning
 	// enforcement on. Policy decisions are unaffected: a missing or broken live
 	// policy still denies, and calls to forbidden-all, break-glass or

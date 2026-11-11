@@ -33,7 +33,7 @@ data:
     # identityMode: enforce (default) | observe. Before any policy runs, a call
     # needs an authenticated caller with a role class and a canonical SPIFFE ID
     # in trustDomain. "observe" lets a call that fails these through and logs
-    # and counts it as `would_deny` with a reason (unauthenticated,
+    # as `would_deny`, and counts it as decision="allow" with a reason (unauthenticated,
     # unknown_role_class, malformed_subject). Run it until none appear, then
     # switch to enforce. Policy decisions are always enforced, and forbidden-all,
     # break-glass and unclassified APIs stay denied. Observe is no stricter than
@@ -41,7 +41,8 @@ data:
     # identityMode: observe
     # A candidate policy. Every call is also checked against it; the live
     # decision still wins. Disagreements are logged: `would_deny` (live allowed,
-    # candidate denies) and `would_allow` (live denied, candidate allows). Must differ from policyPath.
+    # candidate denies) and `would_allow` (live denied, candidate allows). The
+    # metric shows a disagreement as shadow_decision="delta". Must differ from policyPath.
     # shadowPolicyPath: /etc/defakto-spiffe-temporal/policy.next.cedar
 
   # The customer-owned Cedar policy. This copy is the shipped reference

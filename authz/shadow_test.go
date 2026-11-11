@@ -45,35 +45,50 @@ func (c *captureLogger) Info(m string, t ...tag.Tag)  { c.add("info", m, t) }
 func (c *captureLogger) Warn(m string, t ...tag.Tag)  { c.add("warn", m, t) }
 func (c *captureLogger) Error(m string, t ...tag.Tag) { c.add("error", m, t) }
 
-func (c *captureLogger) decisions(decision string) []logLine {
+// decisions returns decision lines (kind allow or deny) or divergence lines
+// (kind would_deny or would_allow).
+func (c *captureLogger) decisions(kind string) []logLine {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []logLine
 	for _, l := range c.lines {
-		if l.msg == "authz decision" && l.fields["decision"] == decision {
+		switch {
+		case kind == decisionWouldDeny || kind == decisionWouldAllow:
+			if l.msg == "authz divergence" && l.fields["divergence"] == kind {
+				out = append(out, l)
+			}
+		case l.msg == "authz decision" && l.fields["decision"] == kind:
 			out = append(out, l)
 		}
 	}
 	return out
 }
 
-type countRecord struct{ decision, verb, reason string }
+type countRecord struct{ decision, shadow, verb, reason string }
 
 // countingHandler records decision counters.
 type countingHandler struct {
 	metrics.Handler
 	mu     sync.Mutex
 	counts []countRecord
+	tags   []metrics.Tag
 }
 
-func (h *countingHandler) Counter(string) metrics.CounterIface     { return counterFunc(h.record) }
-func (h *countingHandler) WithTags(...metrics.Tag) metrics.Handler { return h }
+func (h *countingHandler) Counter(string) metrics.CounterIface { return counterFunc(h.record) }
+func (h *countingHandler) WithTags(tags ...metrics.Tag) metrics.Handler {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tags = append(h.tags, tags...)
+	return h
+}
 func (h *countingHandler) record(tags []metrics.Tag) {
 	var r countRecord
 	for _, t := range tags {
 		switch t.Key {
 		case "decision":
 			r.decision = t.Value
+		case "shadow_decision":
+			r.shadow = t.Value
 		case "verb":
 			r.verb = t.Value
 		case "reason":
@@ -145,8 +160,9 @@ func TestShadow_LiveAllowsCandidateDenies(t *testing.T) {
 	require.Equal(t, "billing", wd[0].fields["namespace"])
 	require.Equal(t, "start-signal", wd[0].fields["verb"])
 	require.Equal(t, "worker", wd[0].fields["attributes"].(map[string]string)["sa"])
-	require.Contains(t, h.counts, countRecord{decisionWouldDeny, "start-signal", reasonAllowed})
-	require.Contains(t, h.counts, countRecord{decisionAllow, "start-signal", reasonAllowed})
+	require.Equal(t, "delta", wd[0].fields["shadowDecision"])
+	// One counter per call: live allow, shadow delta.
+	require.Equal(t, []countRecord{{decisionAllow, shadowDelta, "start-signal", reasonAllowed}}, h.counts)
 
 	// Candidate agrees: no would_deny.
 	logger.lines = nil
@@ -182,7 +198,7 @@ func TestShadow_LiveDeniesCandidateAllows(t *testing.T) {
 	require.Equal(t, authorization.DecisionDeny, res.Decision, "live decision is enforced")
 	require.Len(t, logger.decisions(decisionWouldAllow), 1)
 	require.Empty(t, logger.decisions(decisionWouldDeny))
-	require.Contains(t, h.counts, countRecord{decisionWouldAllow, "start-signal", reasonDeniedByPolicy})
+	require.Equal(t, []countRecord{{decisionDeny, shadowDelta, "start-signal", reasonDeniedByPolicy}}, h.counts)
 
 	// Both agree on deny: no divergence.
 	logger.lines = nil
@@ -278,11 +294,8 @@ func TestIdentityMode_ObserveAllowsAndReports(t *testing.T) {
 			wd := logger.decisions(decisionWouldDeny)
 			require.Len(t, wd, 1)
 			require.Equal(t, tc.code, wd[0].fields["reasonCode"])
-			var found bool
-			for _, c := range h.counts {
-				found = found || (c.decision == decisionWouldDeny && c.reason == tc.code)
-			}
-			require.True(t, found, h.counts)
+			// Forgiven: counted once as allow, with the identity failure as reason.
+			require.Equal(t, []countRecord{{decisionAllow, decisionAllow, "none", tc.code}}, h.counts)
 		})
 	}
 }
@@ -293,7 +306,7 @@ func TestIdentityMode_ObserveStillEnforcesPolicy(t *testing.T) {
 	a, logger, h := newAuthorizerWith(t, scopedPolicy, "", spiffeconfig.DecisionLogOff, spiffeconfig.IdentityModeObserve)
 	require.Equal(t, authorization.DecisionDeny, call(t, a, svcID, "billing").Decision)
 	require.Empty(t, logger.decisions(decisionWouldDeny))
-	require.Contains(t, h.counts, countRecord{decisionDeny, "start-signal", reasonDeniedByPolicy})
+	require.Equal(t, []countRecord{{decisionDeny, decisionDeny, "start-signal", reasonDeniedByPolicy}}, h.counts)
 }
 
 func TestConfig_IdentityModeValidation(t *testing.T) {
@@ -341,4 +354,16 @@ func TestNamespaceTag_Bounded(t *testing.T) {
 	}
 	require.LessOrEqual(t, len(a.namespaces), maxMetricNamespaces)
 	require.Equal(t, otherNamespace, a.namespaceTag(&decisionRecord{namespace: "late", decision: decisionAllow}))
+}
+
+func TestMetrics_TaggedWithFrontendService(t *testing.T) {
+	t.Parallel()
+	_, _, h := newShadowAuthorizer(t, loadReferencePolicy(t), "", spiffeconfig.DecisionLogOff)
+	var got string
+	for _, tg := range h.tags {
+		if tg.Key == "service_name" {
+			got = tg.Value
+		}
+	}
+	require.Equal(t, "frontend", got)
 }
