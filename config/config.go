@@ -96,6 +96,7 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// applyDefaults fills optional fields that were left empty.
 func (c *Config) applyDefaults() {
 	if c.DevIDTemplate == "" {
 		c.DevIDTemplate = DefaultDevIDTemplate
@@ -124,7 +125,7 @@ func (c *Config) Validate() error {
 // They cover the Kubernetes SPIFFE ID shape spiffe://<td>/ns/<ns>/sa/<sa>. An
 // ID of another shape yields "" for ns and sa rather than an error.
 var DefaultAttributes = map[string]string{
-	"trust_domain": `spiffe://([^/]+)/.*`,
+	"trust_domain": `spiffe://([^/]+)(?:/.*)?`,
 	"ns":           `spiffe://[^/]+/ns/([^/]+)/sa/[^/]+`,
 	"sa":           `spiffe://[^/]+/ns/[^/]+/sa/([^/]+)`,
 }

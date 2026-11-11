@@ -111,6 +111,7 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 	return deny("denied by policy"), nil
 }
 
+// deny builds a denial Result carrying reason.
 func deny(reason string) authorization.Result {
 	return authorization.Result{Decision: authorization.DecisionDeny, Reason: reason}
 }
@@ -123,6 +124,7 @@ type attributeRules struct {
 	res   []*regexp.Regexp
 }
 
+// newAttributeRules anchors each pattern and binds the configured trust domain.
 func newAttributeRules(m map[string]*regexp.Regexp, td spiffeid.TrustDomain) attributeRules {
 	names := make([]string, 0, len(m))
 	for n := range m {

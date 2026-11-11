@@ -22,7 +22,7 @@ data:
     # capture group. A pattern is anchored at both ends and must match the WHOLE
     # SPIFFE ID (use `.*` for the parts you ignore). No match gives "".
     # attributes:
-    #   trust_domain: 'spiffe://([^/]+)/.*'
+    #   trust_domain: 'spiffe://([^/]+)(?:/.*)?'
     #   ns:           'spiffe://[^/]+/ns/([^/]+)/sa/[^/]+'
     #   sa:           'spiffe://[^/]+/ns/[^/]+/sa/([^/]+)'
     #   nameSpace:    'spiffe://[^/]+/k8s/([^/]+)/.*'
@@ -35,6 +35,4 @@ data:
             action in [Action::"start-signal", Action::"worker"], resource);
     permit (principal in RoleClass::"human",
             action == Action::"read-only", resource);
-    permit (principal in RoleClass::"human",
-            action == Action::"break-glass", resource);
     forbid (principal, action == Action::"forbidden-all", resource);

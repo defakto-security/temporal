@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	cedar "github.com/cedar-policy/cedar-go"
+	"github.com/cedar-policy/cedar-go/types"
 	"github.com/cedar-policy/cedar-go/x/exp/ast"
 	"github.com/fsnotify/fsnotify"
 	"go.temporal.io/server/common/log"
@@ -78,6 +79,9 @@ func rejectLegacyPrincipalScopes(ps *cedar.PolicySet) error {
 		case ast.ScopeTypeIsIn:
 			legacy = sc.Type == entityRoleClass
 		}
+		if !legacy {
+			legacy = conditionsCompareRoleClass(p.AST().Conditions)
+		}
 		if legacy {
 			return fmt.Errorf("policy %s scopes the principal to a RoleClass with == or is; "+
 				"the principal is now a Workload, so use `principal in RoleClass::\"<class>\"`", id)
@@ -86,6 +90,39 @@ func rejectLegacyPrincipalScopes(ps *cedar.PolicySet) error {
 	return nil
 }
 
+// conditionsCompareRoleClass reports whether any when/unless body tests
+// equality with a RoleClass entity, or uses `is RoleClass`. Such a test can
+// never be true for a Workload principal, so it silently breaks the policy.
+// `in RoleClass::"x"` is the supported form and is not flagged.
+func conditionsCompareRoleClass(conds []ast.ConditionType) bool {
+	isRole := func(n ast.IsNode) bool {
+		v, ok := n.(ast.NodeValue)
+		if !ok {
+			return false
+		}
+		uid, ok := v.Value.(types.EntityUID)
+		return ok && uid.Type == entityRoleClass
+	}
+	found := false
+	for _, c := range conds {
+		ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
+			switch t := n.(type) {
+			case ast.NodeTypeEquals:
+				found = found || isRole(t.Left) || isRole(t.Right)
+			case ast.NodeTypeNotEquals:
+				found = found || isRole(t.Left) || isRole(t.Right)
+			case ast.NodeTypeIs:
+				found = found || t.EntityType == entityRoleClass
+			case ast.NodeTypeIsIn:
+				found = found || t.EntityType == entityRoleClass
+			}
+			return !found
+		})
+	}
+	return found
+}
+
+// watch starts the file watcher on the policy's parent directory.
 func (s *policySource) watch() error {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -102,6 +139,7 @@ func (s *policySource) watch() error {
 	return nil
 }
 
+// loop reloads the policy on each watcher event until the watcher closes.
 func (s *policySource) loop() {
 	for {
 		select {
@@ -132,6 +170,7 @@ func (s *policySource) Close() error {
 	return nil
 }
 
+// dirOf returns the parent directory of path.
 func dirOf(path string) string {
 	for i := len(path) - 1; i >= 0; i-- {
 		if path[i] == '/' {

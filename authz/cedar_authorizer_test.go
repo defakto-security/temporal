@@ -23,6 +23,7 @@ import (
 // in the shipped default is caught by this test.
 const referencePolicyPath = "../reference/policy.cedar"
 
+// loadReferencePolicy is a test helper or test case in this package.
 func loadReferencePolicy(t *testing.T) string {
 	t.Helper()
 	raw, err := os.ReadFile(referencePolicyPath)
@@ -30,6 +31,7 @@ func loadReferencePolicy(t *testing.T) string {
 	return string(raw)
 }
 
+// newTestAuthorizer is a test helper or test case in this package.
 func newTestAuthorizer(t *testing.T, policy string) *CedarAuthorizer {
 	t.Helper()
 	dir := t.TempDir()
@@ -53,6 +55,7 @@ const (
 	humanID = "spiffe://corp.defakto.security/devid/alice"
 )
 
+// claims is a test helper or test case in this package.
 func claims(class authn.RoleClass) *authorization.Claims {
 	subject := svcID
 	if class == authn.RoleClassHuman {
@@ -61,10 +64,12 @@ func claims(class authn.RoleClass) *authorization.Claims {
 	return claimsFor(subject, class)
 }
 
+// claimsFor is a test helper or test case in this package.
 func claimsFor(subject string, class authn.RoleClass) *authorization.Claims {
 	return &authorization.Claims{Subject: subject, AuthType: "spiffe", Extensions: class}
 }
 
+// target is a test helper or test case in this package.
 func target(api string) *authorization.CallTarget {
 	return &authorization.CallTarget{APIName: api, Namespace: "dev_portal"}
 }
@@ -72,6 +77,7 @@ func target(api string) *authorization.CallTarget {
 const svc = "/temporal.api.workflowservice.v1.WorkflowService/"
 const adminSvc = "/temporal.server.api.adminservice.v1.AdminService/"
 
+// TestAuthorize_ReferencePolicy is a test helper or test case in this package.
 func TestAuthorize_ReferencePolicy(t *testing.T) {
 	t.Parallel()
 	a := newTestAuthorizer(t, loadReferencePolicy(t))
@@ -116,6 +122,7 @@ func TestAuthorize_ReferencePolicy(t *testing.T) {
 	}
 }
 
+// TestAuthorize_FailClosed is a test helper or test case in this package.
 func TestAuthorize_FailClosed(t *testing.T) {
 	t.Parallel()
 	a := newTestAuthorizer(t, loadReferencePolicy(t))
@@ -160,6 +167,7 @@ permit (
 forbid (principal, action == Action::"forbidden-all", resource);
 `
 
+// TestAuthorize_PerWorkloadScoping is a test helper or test case in this package.
 func TestAuthorize_PerWorkloadScoping(t *testing.T) {
 	t.Parallel()
 	a := newTestAuthorizer(t, scopedPolicy)
@@ -191,6 +199,7 @@ func TestAuthorize_PerWorkloadScoping(t *testing.T) {
 	}
 }
 
+// TestAuthorize_MalformedSubjectDenied is a test helper or test case in this package.
 func TestAuthorize_MalformedSubjectDenied(t *testing.T) {
 	t.Parallel()
 	a := newTestAuthorizer(t, loadReferencePolicy(t))
@@ -210,6 +219,7 @@ func TestAuthorize_MalformedSubjectDenied(t *testing.T) {
 	}
 }
 
+// mustRules is a test helper or test case in this package.
 func mustRules(t *testing.T, attrs map[string]string) attributeRules {
 	t.Helper()
 	cfg := &spiffeconfig.Config{Attributes: attrs}
@@ -220,6 +230,7 @@ func mustRules(t *testing.T, attrs map[string]string) attributeRules {
 	return newAttributeRules(m, td)
 }
 
+// attrOf is a test helper or test case in this package.
 func attrOf(t *testing.T, r attributeRules, subject, name string) types.Value {
 	t.Helper()
 	_, ents, ok := r.principalEntities(subject, authn.RoleClassService)
@@ -229,6 +240,7 @@ func attrOf(t *testing.T, r attributeRules, subject, name string) types.Value {
 	return v
 }
 
+// TestPrincipalEntities_DefaultAttributes is a test helper or test case in this package.
 func TestPrincipalEntities_DefaultAttributes(t *testing.T) {
 	t.Parallel()
 	r := mustRules(t, nil)
@@ -242,6 +254,7 @@ func TestPrincipalEntities_DefaultAttributes(t *testing.T) {
 	require.Equal(t, types.String(""), attrOf(t, r, node, "ns"))
 }
 
+// TestPrincipalEntities_CustomAttributes is a test helper or test case in this package.
 func TestPrincipalEntities_CustomAttributes(t *testing.T) {
 	t.Parallel()
 	r := mustRules(t, map[string]string{
@@ -257,6 +270,7 @@ func TestPrincipalEntities_CustomAttributes(t *testing.T) {
 	require.Equal(t, types.String("pay-core"), attrOf(t, r, id, "ns"), "defaults stay unless overridden")
 }
 
+// TestAuthorize_CustomAttributeInPolicy is a test helper or test case in this package.
 func TestAuthorize_CustomAttributeInPolicy(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -311,4 +325,27 @@ func TestPolicyLoad_RejectsLegacyRoleClassScope(t *testing.T) {
 		_, err := NewCedarAuthorizer(cfg, log.NewNoopLogger())
 		require.ErrorContains(t, err, "principal in RoleClass")
 	}
+}
+
+// A legacy RoleClass comparison hidden in when/unless is refused at load.
+func TestPolicyLoad_RejectsLegacyRoleClassCondition(t *testing.T) {
+	t.Parallel()
+	for _, pol := range []string{
+		`permit (principal, action, resource) when { principal == RoleClass::"service" };`,
+		`forbid (principal, action, resource) unless { principal != RoleClass::"human" };`,
+		`permit (principal, action, resource) when { principal is RoleClass };`,
+	} {
+		path := filepath.Join(t.TempDir(), "policy.cedar")
+		require.NoError(t, os.WriteFile(path, []byte(pol), 0o600))
+		cfg := &spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, TrustDomain: "corp.defakto.security", PolicyPath: path}
+		_, err := NewCedarAuthorizer(cfg, log.NewNoopLogger())
+		require.ErrorContains(t, err, "principal in RoleClass", pol)
+	}
+}
+
+// An ID with no path still yields a trust_domain.
+func TestPrincipalEntities_PathlessTrustDomain(t *testing.T) {
+	t.Parallel()
+	r := mustRules(t, nil)
+	require.Equal(t, types.String("corp.defakto.security"), attrOf(t, r, "spiffe://corp.defakto.security", "trust_domain"))
 }
