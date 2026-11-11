@@ -44,8 +44,6 @@ persistence:
         databaseName: temporal
         connectAddr: temporal.cluster-xxxx.us-east-2.rds.amazonaws.com:5432
         connectProtocol: tcp
-        # The IAM-only login role (infra: databaseIam.enabled). Not `temporal`:
-        # that role keeps its password login during migration.
         user: temporal_iam
         # No password: see databaseIAM in the module config.
         tls:
