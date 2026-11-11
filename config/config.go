@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"regexp"
 
 	"go.yaml.in/yaml/v3"
@@ -62,7 +63,43 @@ type Config struct {
 	// mounted from the ConfigMap. The authorizer loads, validates, and
 	// hot-reloads it, failing closed on absent/invalid.
 	PolicyPath string `yaml:"policyPath"`
+
+	// ShadowPolicyPath is an optional candidate Cedar policy. When set, every
+	// call is also evaluated against the candidate; the live decision is still
+	// the one enforced. Disagreements are logged: would_deny (live allowed,
+	// candidate denies) and would_allow (live denied, candidate allows). Used to test a narrower policy before it
+	// replaces the live one. Empty disables shadow mode.
+	ShadowPolicyPath string `yaml:"shadowPolicyPath"`
+
+	// DecisionLog selects which authorization decisions are logged: "off"
+	// (default; only evaluation errors and shadow/identity divergences, would_deny and would_allow, are logged), "deny", or
+	// "all" (every decision, with principal, attributes, namespace, API and verb).
+	DecisionLog string `yaml:"decisionLog"`
+
+	// IdentityMode controls the checks that run before any policy: a caller
+	// must be authenticated, have a role class, and present a canonical SPIFFE
+	// ID in TrustDomain. "enforce" (default) denies a call that fails them.
+	// "observe" allows it anyway and logs and counts it as would_deny with the
+	// reason, so you can find callers without a valid identity before turning
+	// enforcement on. Policy decisions are unaffected: a missing or broken live
+	// policy still denies, and calls to forbidden-all, break-glass or
+	// unclassified APIs stay denied. Observe is no stricter than running with
+	// no authorizer at all; do not leave it on once callers are identified.
+	IdentityMode string `yaml:"identityMode"`
 }
+
+// Identity modes for Config.IdentityMode.
+const (
+	IdentityModeEnforce = "enforce"
+	IdentityModeObserve = "observe"
+)
+
+// Decision-log levels for Config.DecisionLog.
+const (
+	DecisionLogOff  = "off"
+	DecisionLogDeny = "deny"
+	DecisionLogAll  = "all"
+)
 
 // HumanTokenConfig carries the parameters for verifying portal-issued OIDC
 // tokens (Milestone 2). forwardHeaders is transport, not trust: the frontend
@@ -101,6 +138,12 @@ func (c *Config) applyDefaults() {
 	if c.DevIDTemplate == "" {
 		c.DevIDTemplate = DefaultDevIDTemplate
 	}
+	if c.IdentityMode == "" {
+		c.IdentityMode = IdentityModeEnforce
+	}
+	if c.DecisionLog == "" {
+		c.DecisionLog = DecisionLogOff
+	}
 }
 
 // Validate checks the required invariants of the config contract.
@@ -114,6 +157,19 @@ func (c *Config) Validate() error {
 	}
 	if c.PolicyPath == "" {
 		errs = append(errs, errors.New("policyPath is required"))
+	}
+	switch c.DecisionLog {
+	case "", DecisionLogOff, DecisionLogDeny, DecisionLogAll:
+	default:
+		errs = append(errs, fmt.Errorf("decisionLog %q must be one of off, deny, all", c.DecisionLog))
+	}
+	switch c.IdentityMode {
+	case "", IdentityModeEnforce, IdentityModeObserve:
+	default:
+		errs = append(errs, fmt.Errorf("identityMode %q must be one of enforce, observe", c.IdentityMode))
+	}
+	if c.ShadowPolicyPath != "" && filepath.Clean(c.ShadowPolicyPath) == filepath.Clean(c.PolicyPath) {
+		errs = append(errs, errors.New("shadowPolicyPath must differ from policyPath"))
 	}
 	if _, err := c.AttributeRules(); err != nil {
 		errs = append(errs, err)
