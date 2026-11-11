@@ -11,7 +11,9 @@ import (
 const CmdElasticsearchTool = "elasticsearch-tool"
 
 // runTool runs the elasticsearch tool when args select it. It reports whether
-// it ran, and the tool's error.
+// it ran, and any error from the CLI layer (bad flags). A failed command makes
+// the upstream tool exit the process with status 1 itself, so it never
+// returns here.
 func runTool(args []string) (bool, error) {
 	if len(args) < 2 || args[1] != CmdElasticsearchTool {
 		return false, nil

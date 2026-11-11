@@ -1,22 +1,41 @@
 # Reference Temporal server config: visibility on OpenSearch, signed with the
-# pod's IRSA role (SigV4, service "es"). No visibility password is stored.
+# pod's IRSA role (SigV4, service "es", i.e. a managed domain, not Serverless).
+# No visibility password is stored.
 #
-# This is Temporal's own config (persistence:), not the module config. Put it
-# in the Temporal config directory the image reads (TEMPORAL_CONFIG_DIR). The
-# stock Helm chart cannot render these keys, so the ConfigMap carries them.
+# This is Temporal's own config (the persistence block), not the module config.
+# Temporal reads base.yaml, then <environment>.yaml, from TEMPORAL_CONFIG_DIR
+# and merges them. Merge this block into one of those files; a file with any
+# other name in that directory is ignored. The stock Helm chart cannot render
+# these keys, so the ConfigMap that mounts the config directory carries them.
 #
-# Create the index template and the index before the first start. The image
-# ships Temporal's own tool, signing with the same IRSA role:
+# One-time setup, run as a Job BEFORE the first server start. The image ships
+# Temporal's own tool and signs with the pod's IRSA role. Set AWS_REGION on the
+# Job explicitly (the tool needs it; the server uses `region` below instead).
 #   defakto-spiffe-temporal elasticsearch-tool \
 #     --ep https://<domain-endpoint> --aws-credentials aws-sdk-default \
 #     setup-schema
 #   defakto-spiffe-temporal elasticsearch-tool \
 #     --ep https://<domain-endpoint> --aws-credentials aws-sdk-default \
 #     create-index --index temporal_visibility_v1_dev
-# The tool reads the region from AWS_REGION (set by IRSA's pod webhook).
+# Order matters: the index takes its mappings from the template. Later
+# template versions use `update-schema`.
+# Do not pass --quiet or --fail in the Job: either turns a failed setup into
+# exit 0.
+#
+# Permissions: setup writes cluster settings, the index template and the
+# index. That is admin-level. Run the Job under its own role and service
+# account, and give the long-running server only what it needs to read and
+# write its index. With fine-grained access control, map each IAM role to an
+# OpenSearch role. If the domain refuses the cluster-settings write, add
+# --skip-cluster-settings to setup-schema. That setting
+# (action.auto_create_index=false) stops a typo from creating a stray index.
+#
+# Not tested against a real OpenSearch 3.x domain. Run setup, start the
+# server and list workflows once before relying on this.
 persistence:
   defaultStore: default
   visibilityStore: es-visibility
+  # Fixed for the life of the cluster. Choose it before the first start.
   numHistoryShards: 512
   datastores:
     default:
@@ -33,7 +52,8 @@ persistence:
           caFile: /etc/ssl/rds/global-bundle.pem
     es-visibility:
       elasticsearch:
-        # OpenSearch 3.x speaks the Elasticsearch 7 API Temporal uses.
+        # Temporal's only client for this store is the Elasticsearch 7 API;
+        # v7 selects it.
         version: v7
         url:
           scheme: https
@@ -46,6 +66,7 @@ persistence:
         enableHealthcheck: false
         aws-request-signing:
           enabled: true
+          # Must match the domain's region. If omitted, AWS_REGION is used.
           region: us-east-2
           # Reads the IRSA web-identity env vars. Credentials refresh about
           # once an hour (Temporal's signer, not ours).
