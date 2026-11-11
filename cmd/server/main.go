@@ -12,10 +12,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	stdlog "log"
 	"os"
 	"strings"
+	"time"
 
 	// Persistence plugins the stock server loads; a custom main must import
 	// them itself or the server cannot open its datastore.
@@ -23,15 +26,19 @@ import (
 	_ "go.temporal.io/server/common/persistence/sql/sqlplugin/postgresql"
 	_ "go.temporal.io/server/common/persistence/sql/sqlplugin/sqlite"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/temporal"
 
 	"github.com/defakto-security/temporal/authn"
 	"github.com/defakto-security/temporal/authz"
 	spiffeconfig "github.com/defakto-security/temporal/config"
+	"github.com/defakto-security/temporal/dbauth"
 )
 
 // EnvServices names the env var selecting which Temporal services this process
@@ -77,7 +84,19 @@ func run() error {
 	authorizer.WithMetrics(metricsHandler)
 	defer func() { _ = authorizer.Close() }()
 
-	s, err := temporal.NewServer(
+	// Optional RDS IAM auth: load Temporal's config here so we can hook the
+	// SQL stores, then hand the result to the server.
+	var iamOpts []temporal.ServerOption
+	if appCfg.DatabaseIAM.Enabled {
+		mgr, tcfg, err := setupDatabaseIAM(appCfg.DatabaseIAM, logger)
+		if err != nil {
+			return err
+		}
+		defer mgr.Close()
+		iamOpts = append(iamOpts, temporal.WithConfig(tcfg))
+	}
+
+	opts := []temporal.ServerOption{
 		// Without ForServices the server starts NO services (upstream skips any
 		// service not named), so the process would run no frontend/history/
 		// matching/worker and silently idle. Honor TEMPORAL_SERVICES as the
@@ -94,7 +113,8 @@ func run() error {
 		temporal.WithClaimMapper(func(*config.Config) authorization.ClaimMapper {
 			return authn.NewClaimMapper(appCfg, logger)
 		}),
-	)
+	}
+	s, err := temporal.NewServer(append(opts, iamOpts...)...)
 	if err != nil {
 		return err
 	}
@@ -118,6 +138,45 @@ func temporalMetricsHandler(logger log.Logger) (metrics.Handler, error) {
 		return nil, fmt.Errorf("loading temporal config for metrics: %w", err)
 	}
 	return metrics.MetricsHandlerFromConfig(logger, cfg.Global.Metrics)
+}
+
+// setupDatabaseIAM loads Temporal's config and points every SQL store at the
+// cached RDS IAM token. The caller must Close the returned Manager.
+func setupDatabaseIAM(iam spiffeconfig.DatabaseIAMConfig, logger log.Logger) (*dbauth.Manager, *config.Config, error) {
+	region := iam.Region
+	if region == "" {
+		region = os.Getenv("AWS_REGION")
+	}
+	if region == "" {
+		return nil, nil, errors.New("databaseIAM: region is unset and AWS_REGION is empty")
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+		awsconfig.WithRegion(region),
+		// Refresh IRSA credentials 5 minutes early, so a token is never
+		// signed with credentials that are about to expire.
+		awsconfig.WithCredentialsCacheOptions(func(o *aws.CredentialsCacheOptions) {
+			o.ExpiryWindow = 5 * time.Minute
+		}),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databaseIAM: loading AWS config: %w", err)
+	}
+	tcfg, err := config.Load(
+		config.WithConfigDir(temporalConfigDir()),
+		config.WithEnv(os.Getenv(config.EnvKeyEnvironment)),
+		config.WithZone(os.Getenv(config.EnvKeyAvailabilityZone)),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("databaseIAM: loading Temporal config: %w", err)
+	}
+	mgr := dbauth.NewManager(region, awsCfg.Credentials, iam.RefreshInterval, func(err error) {
+		logger.Error("RDS IAM token refresh failed; keeping the previous token", tag.Error(err))
+	})
+	if err := mgr.Apply(tcfg); err != nil {
+		mgr.Close()
+		return nil, nil, fmt.Errorf("databaseIAM: %w", err)
+	}
+	return mgr, tcfg, nil
 }
 
 // temporalConfigDir returns the Temporal config directory.

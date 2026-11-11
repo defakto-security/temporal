@@ -26,6 +26,15 @@ data:
     #   ns:           'spiffe://[^/]+/ns/([^/]+)/sa/[^/]+'
     #   sa:           'spiffe://[^/]+/ns/[^/]+/sa/([^/]+)'
     #   nameSpace:    'spiffe://[^/]+/k8s/([^/]+)/.*'
+    # Passwordless Postgres on RDS (IRSA). Needs pluginName postgres12_pgx, TLS
+    # with enableHostVerification and caFile (the RDS CA bundle), connectAddr =
+    # the RDS endpoint as host:port, and no password in Temporal's own
+    # persistence config. A token is signed
+    # in the background every refreshInterval; connections only read the cache.
+    # databaseIAM:
+    #   enabled: true
+    #   region: us-east-2        # default: AWS_REGION
+    #   refreshInterval: 10m     # tokens last 15m; must stay under 14m
     policyPath: /etc/defakto-spiffe-temporal/policy.cedar
     # Rollout aids. decisionLog: off (default) | deny | all. "all" logs every
     # decision with principal, attributes, namespace, API and verb.
