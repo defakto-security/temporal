@@ -9,6 +9,11 @@ RUN apt-get update && apt-get install -y \
  && rm -rf /var/lib/apt/lists/*
 RUN update-ca-certificates
 
+# AWS RDS trust bundle, fetched by `make certs`. The server's RDS connection
+# uses verify-full, so set the Temporal SQL store's tls.caFile to this path.
+# It is world-readable so the non-root user below can read it.
+COPY build/certs/rds-global-bundle.pem /etc/ssl/rds/global-bundle.pem
+
 # Matches the Makefile output path: build/$GOOS/$GOARCH/server. Using
 # TARGETOS/TARGETARCH (not TARGETPLATFORM) avoids the arm64 variant suffix
 # (linux/arm64/v8), which would not match the build/linux/arm64/ path.
