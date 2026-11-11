@@ -1,0 +1,52 @@
+# Reference Temporal server config: visibility on OpenSearch, signed with the
+# pod's IRSA role (SigV4, service "es"). No visibility password is stored.
+#
+# This is Temporal's own config (persistence:), not the module config. Put it
+# in the Temporal config directory the image reads (TEMPORAL_CONFIG_DIR). The
+# stock Helm chart cannot render these keys, so the ConfigMap carries them.
+#
+# Create the index template and the index before the first start. The image
+# ships Temporal's own tool, signing with the same IRSA role:
+#   defakto-spiffe-temporal elasticsearch-tool \
+#     --ep https://<domain-endpoint> --aws-credentials aws-sdk-default \
+#     setup-schema
+#   defakto-spiffe-temporal elasticsearch-tool \
+#     --ep https://<domain-endpoint> --aws-credentials aws-sdk-default \
+#     create-index --index temporal_visibility_v1_dev
+# The tool reads the region from AWS_REGION (set by IRSA's pod webhook).
+persistence:
+  defaultStore: default
+  visibilityStore: es-visibility
+  numHistoryShards: 512
+  datastores:
+    default:
+      sql:
+        pluginName: postgres12_pgx
+        databaseName: temporal
+        connectAddr: temporal.cluster-xxxx.us-east-2.rds.amazonaws.com:5432
+        connectProtocol: tcp
+        user: temporal
+        # No password: see databaseIAM in the module config.
+        tls:
+          enabled: true
+          enableHostVerification: true
+          caFile: /etc/ssl/rds/global-bundle.pem
+    es-visibility:
+      elasticsearch:
+        # OpenSearch 3.x speaks the Elasticsearch 7 API Temporal uses.
+        version: v7
+        url:
+          scheme: https
+          host: search-temporal-xxxx.us-east-2.es.amazonaws.com:443
+        indices:
+          visibility: temporal_visibility_v1_dev
+        # A managed domain sits behind one endpoint. Sniffing would try the
+        # node addresses it reports, which are not reachable.
+        enableSniff: false
+        enableHealthcheck: false
+        aws-request-signing:
+          enabled: true
+          region: us-east-2
+          # Reads the IRSA web-identity env vars. Credentials refresh about
+          # once an hour (Temporal's signer, not ours).
+          credentialProvider: aws-sdk-default

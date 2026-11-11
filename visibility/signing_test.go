@@ -5,11 +5,14 @@ package visibility
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/persistence/visibility/store/elasticsearch/client"
+	"go.yaml.in/yaml/v3"
 )
 
 // TestSigV4Config checks Temporal's own aws-request-signing support, as the
@@ -63,4 +66,32 @@ func TestSigV4UnknownProvider(t *testing.T) {
 		CredentialProvider: "irsa",
 	})
 	require.Error(t, err)
+}
+
+// TestReferenceConfig_Visibility loads the shipped reference config the way
+// Temporal does and checks the visibility store is OpenSearch with IRSA
+// signing, and that the whole persistence block passes Temporal's validation.
+func TestReferenceConfig_Visibility(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("../reference/temporal-visibility.example.yaml")
+	require.NoError(t, err)
+
+	var cfg struct {
+		Persistence config.Persistence `yaml:"persistence"`
+	}
+	require.NoError(t, yaml.Unmarshal(raw, &cfg))
+	require.NoError(t, cfg.Persistence.Validate())
+
+	require.Equal(t, "es-visibility", cfg.Persistence.VisibilityStore)
+	es := cfg.Persistence.DataStores["es-visibility"].Elasticsearch
+	require.NotNil(t, es)
+	require.Equal(t, "v7", es.Version)
+	require.Equal(t, "https", es.URL.Scheme)
+	require.False(t, es.EnableSniff)
+	require.Empty(t, es.Username)
+	require.Empty(t, es.Password)
+	require.True(t, es.AWSRequestSigning.Enabled)
+	require.Equal(t, "aws-sdk-default", es.AWSRequestSigning.CredentialProvider)
+	require.NotEmpty(t, es.AWSRequestSigning.Region)
+	require.NotEmpty(t, es.GetVisibilityIndex())
 }
