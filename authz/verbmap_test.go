@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 )
 
+// TestVerbClassOf is a test helper or test case in this package.
 func TestVerbClassOf(t *testing.T) {
 	t.Parallel()
 

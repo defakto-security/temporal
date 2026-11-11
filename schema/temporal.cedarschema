@@ -6,11 +6,18 @@
 // No namespace wrapper: the authorizer and reference policy use unqualified
 // identifiers (RoleClass, Namespace, Action::"..."), so the schema must too.
 entity RoleClass;
+entity Workload in [RoleClass] {
+  trust_domain: String,
+  ns: String,
+  sa: String,
+  // Customer attributes from config `attributes` are not listed here: the
+  // schema is a CI/documentation artifact and runtime does not depend on it.
+};
 entity VerbClass;
 entity Namespace;
 
 action "read-only", "start-signal", "worker", "break-glass", "forbidden-all"
   appliesTo {
-    principal: [RoleClass],
+    principal: [Workload],
     resource: [Namespace],
   };

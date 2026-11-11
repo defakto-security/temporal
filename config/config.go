@@ -11,7 +11,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"regexp"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -48,6 +50,13 @@ type Config struct {
 	// validate human bearer tokens forwarded from Temporal Web. Optional until
 	// Milestone 2 (Temporal Web authentication).
 	Human HumanTokenConfig `yaml:"human"`
+
+	// Attributes adds to or overrides the principal attributes a Cedar policy
+	// can read (`principal.<name>`). Each value is an RE2 regular expression
+	// with exactly one capture group. It is anchored at both ends, so it must
+	// match the caller's whole SPIFFE ID (add `.*` for the parts you ignore);
+	// the captured text is the attribute value, or "" when it does not match. A name that equals a default (trust_domain, ns, sa) replaces it.
+	Attributes map[string]string `yaml:"attributes"`
 
 	// PolicyPath is the filesystem path to the customer-owned Cedar policy,
 	// mounted from the ConfigMap. The authorizer loads, validates, and
@@ -87,6 +96,7 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// applyDefaults fills optional fields that were left empty.
 func (c *Config) applyDefaults() {
 	if c.DevIDTemplate == "" {
 		c.DevIDTemplate = DefaultDevIDTemplate
@@ -105,5 +115,62 @@ func (c *Config) Validate() error {
 	if c.PolicyPath == "" {
 		errs = append(errs, errors.New("policyPath is required"))
 	}
+	if _, err := c.AttributeRules(); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
+}
+
+// DefaultAttributes are the principal attributes available with no config.
+// They cover the Kubernetes SPIFFE ID shape spiffe://<td>/ns/<ns>/sa/<sa>. An
+// ID of another shape yields "" for ns and sa rather than an error.
+var DefaultAttributes = map[string]string{
+	"trust_domain": `spiffe://([^/]+)(?:/.*)?`,
+	"ns":           `spiffe://[^/]+/ns/([^/]+)/sa/[^/]+`,
+	"sa":           `spiffe://[^/]+/ns/[^/]+/sa/([^/]+)`,
+}
+
+// cedarIdent is what Cedar accepts after `principal.`.
+var cedarIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// cedarReserved cannot be used as an attribute name in dot form.
+var cedarReserved = map[string]bool{
+	"true": true, "false": true, "if": true, "then": true, "else": true,
+	"in": true, "is": true, "like": true, "has": true,
+	"principal": true, "action": true, "resource": true, "context": true,
+	"permit": true, "forbid": true, "when": true, "unless": true,
+}
+
+// AttributeRules returns the compiled attribute rules: DefaultAttributes with
+// the customer's Attributes layered on top. It reports every bad name or
+// pattern so a ConfigMap typo is caught at startup, not at the first request.
+func (c *Config) AttributeRules() (map[string]*regexp.Regexp, error) {
+	merged := make(map[string]string, len(DefaultAttributes)+len(c.Attributes))
+	maps.Copy(merged, DefaultAttributes)
+	maps.Copy(merged, c.Attributes)
+
+	rules := make(map[string]*regexp.Regexp, len(merged))
+	var errs []error
+	for name, pattern := range merged {
+		if !cedarIdent.MatchString(name) || cedarReserved[name] {
+			errs = append(errs, fmt.Errorf("attributes: %q is not a usable Cedar attribute name", name))
+			continue
+		}
+		// Anchor both ends so a rule matches the whole ID, never a substring
+		// of a lookalike path.
+		re, err := regexp.Compile(`^(?:` + pattern + `)$`)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("attributes.%s: %w", name, err))
+			continue
+		}
+		if re.NumSubexp() != 1 {
+			errs = append(errs, fmt.Errorf("attributes.%s: pattern needs exactly one capture group, has %d", name, re.NumSubexp()))
+			continue
+		}
+		rules[name] = re
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return rules, nil
 }

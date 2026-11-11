@@ -39,12 +39,14 @@ import (
 // honor it or every pod runs every service.
 const EnvServices = "TEMPORAL_SERVICES"
 
+// main runs the server and exits non-zero on error.
 func main() {
 	if err := run(); err != nil {
 		stdlog.Fatalf("defakto-spiffe-temporal: %v", err)
 	}
 }
 
+// run starts the Temporal server with the Cedar authorizer.
 func run() error {
 	logger := log.NewZapLogger(log.BuildZapLogger(log.Config{}))
 
@@ -90,6 +92,7 @@ func run() error {
 	return s.Stop()
 }
 
+// temporalConfigDir returns the Temporal config directory.
 func temporalConfigDir() string {
 	if dir := os.Getenv(config.EnvKeyConfigDir); dir != "" {
 		return dir
