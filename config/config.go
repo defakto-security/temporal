@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -29,24 +30,46 @@ const EnvConfigPath = "DEFAKTO_SPIFFE_TEMPORAL_CONFIG"
 // Version does not match is rejected at startup rather than best-effort parsed.
 const SchemaVersion = 1
 
-// DefaultDevIDTemplate is the human-identity path template assumed when the
-// customer does not override it. The human/service role derivation is a
-// prefix test against the rendered form of this template.
-const DefaultDevIDTemplate = "/users/{domain}/{username}"
-
 // Config is the parsed, validated config contract.
 type Config struct {
 	// Version pins the schema. Must equal SchemaVersion.
 	Version int `yaml:"version"`
 
-	// TrustDomain is the Defakto SPIFFE trust domain this cluster authenticates
-	// against, e.g. "corp.defakto.security".
-	TrustDomain string `yaml:"trustDomain"`
+	// WorkloadAPI says where to get the keys that verify a caller's JWT-SVID.
+	// Trust domains are not listed: the SPIFFE agent decides which bundles it
+	// holds (including federated ones), and the Cedar policy decides what each
+	// trust domain may do, through `principal.trust_domain`.
+	WorkloadAPI WorkloadAPIConfig `yaml:"workloadAPI"`
 
-	// DevIDTemplate is the DevID path template for human identities. The
-	// leading literal segment (before the first placeholder) is the prefix the
-	// human/service test keys on. Defaults to DefaultDevIDTemplate.
+	// ClientCertAuth lets a caller with no `authorization` header be identified
+	// by its mTLS client certificate, if that is an X.509-SVID with one
+	// canonical SPIFFE ID as its URI SAN. Temporal's worker and scheduler need
+	// this, as they dial the frontend over mTLS only. A header always wins.
+	// Temporal's TLS must verify the chain (tls.frontend.server.requireClientAuth
+	// and clientCaFiles); the mapper then checks the cert against the roots of
+	// its own trust domain, from the Workload API. Without a verified chain the
+	// cert is ignored. Default off.
+	ClientCertAuth bool `yaml:"clientCertAuth"`
+
+	// DevIDTemplate is the SPIFFE ID template for human identities. An ID is
+	// human only if its whole path fits the template: each {placeholder} is one
+	// non-empty path segment. Write the full form,
+	// "spiffe://admin.example.org/users/{domain}/{username}", to accept humans
+	// from one trust domain only. The literal part before the first placeholder
+	// must end in "/". Empty means no identity is human. A path-only form
+	// ("/users/{domain}/{username}") matches the path in ANY trust domain, and
+	// is refused unless HumanFromAnyTrustDomain is true.
 	DevIDTemplate string `yaml:"devIDTemplate"`
+
+	// HumanFromAnyTrustDomain allows a path-only DevIDTemplate. Do not set it
+	// if the agent federates with other trust domains.
+	HumanFromAnyTrustDomain bool `yaml:"humanFromAnyTrustDomain"`
+
+	// ServiceIDTemplate optionally limits which identities are services, with
+	// the same grammar as DevIDTemplate. An ID that is neither human nor a
+	// service gets no role class and is denied. Empty means every ID that is
+	// not human is a service.
+	ServiceIDTemplate string `yaml:"serviceIDTemplate"`
 
 	// Human holds the portal-issued-OIDC verification parameters used to
 	// validate human bearer tokens forwarded from Temporal Web. Optional until
@@ -55,9 +78,11 @@ type Config struct {
 
 	// Attributes adds to or overrides the principal attributes a Cedar policy
 	// can read (`principal.<name>`). Each value is an RE2 regular expression
-	// with exactly one capture group. It is anchored at both ends, so it must
-	// match the caller's whole SPIFFE ID (add `.*` for the parts you ignore);
-	// the captured text is the attribute value, or "" when it does not match. A name that equals a default (trust_domain, ns, sa) replaces it.
+	// with exactly one capture group, matched against the caller's SPIFFE ID
+	// without the "spiffe://" scheme (a leading "spiffe://" in the pattern is
+	// stripped). It is anchored at both ends, so it must
+	// match the whole ID (add `.*` for the parts you ignore);
+	// the captured text is the attribute value, or "" when it does not match. A name that equals a default (ns, sa) replaces it. trust_domain is always the ID's own trust domain and cannot be set here.
 	Attributes map[string]string `yaml:"attributes"`
 
 	// DatabaseIAM turns on RDS IAM authentication for Temporal's Postgres
@@ -84,7 +109,7 @@ type Config struct {
 
 	// IdentityMode controls the checks that run before any policy: a caller
 	// must be authenticated, have a role class, and present a canonical SPIFFE
-	// ID in TrustDomain. "enforce" (default) denies a call that fails them.
+	// ID. "enforce" (default) denies a call that fails them.
 	// "observe" allows it anyway, logs it as would_deny, and counts it as
 	// decision="allow" with the
 	// reason, so you can find callers without a valid identity before turning
@@ -125,6 +150,20 @@ type DatabaseIAMConfig struct {
 // Shorter values would hammer STS/credential providers for no benefit.
 const MinRefreshInterval = 30 * time.Second
 
+// WorkloadAPIConfig configures the SPIFFE Workload API source that supplies
+// JWT bundles. The agent streams bundles over a local socket; a token is
+// verified against that in-memory copy, with no call per request.
+type WorkloadAPIConfig struct {
+	// Address is the agent socket, e.g. unix:///run/spiffe/agent.sock. Empty
+	// means the SPIFFE_ENDPOINT_SOCKET env var.
+	Address string `yaml:"address"`
+	// Audience is the one aud every accepted JWT-SVID must carry (a token with
+	// extra audiences is refused). Required. Make it unique per cluster, such
+	// as "temporal/prod-us-east-2", so a token for one cluster is useless on
+	// another. A JWT-SVID is a bearer token: serve the frontend over TLS.
+	Audience string `yaml:"audience"`
+}
+
 // HumanTokenConfig carries the parameters for verifying portal-issued OIDC
 // tokens (Milestone 2). forwardHeaders is transport, not trust: the frontend
 // must verify signature/issuer/audience/expiry against the portal JWKS.
@@ -159,9 +198,6 @@ func Load(path string) (*Config, error) {
 
 // applyDefaults fills optional fields that were left empty.
 func (c *Config) applyDefaults() {
-	if c.DevIDTemplate == "" {
-		c.DevIDTemplate = DefaultDevIDTemplate
-	}
 	if c.IdentityMode == "" {
 		c.IdentityMode = IdentityModeEnforce
 	}
@@ -179,8 +215,14 @@ func (c *Config) Validate() error {
 	if c.Version != SchemaVersion {
 		errs = append(errs, fmt.Errorf("version %d is unsupported (want %d)", c.Version, SchemaVersion))
 	}
-	if c.TrustDomain == "" {
-		errs = append(errs, errors.New("trustDomain is required"))
+	if c.WorkloadAPI.Audience == "" {
+		errs = append(errs, errors.New("workloadAPI.audience is required"))
+	}
+	if _, err := c.HumanMatcher(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.ServiceMatcher(); err != nil {
+		errs = append(errs, err)
 	}
 	if c.PolicyPath == "" {
 		errs = append(errs, errors.New("policyPath is required"))
@@ -207,13 +249,25 @@ func (c *Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// DefaultAttributes are the principal attributes available with no config.
-// They cover the Kubernetes SPIFFE ID shape spiffe://<td>/ns/<ns>/sa/<sa>. An
-// ID of another shape yields "" for ns and sa rather than an error.
+// SPIFFEScheme is the prefix every SPIFFE ID starts with. Attribute patterns
+// are matched against the ID without it (a leading copy in a pattern is
+// stripped at load), so `<td>/ns/<ns>/sa/<sa>` is what a pattern sees.
+const SPIFFEScheme = "spiffe://"
+
+// TrustDomainAttribute is the principal attribute holding the caller's trust
+// domain. The authorizer sets it from the parsed SPIFFE ID, never from a
+// pattern, so config cannot override it: policies rely on it as the boundary
+// between trust domains.
+const TrustDomainAttribute = "trust_domain"
+
+// DefaultAttributes are the pattern-based principal attributes available with
+// no config (trust_domain is set separately, see TrustDomainAttribute). They
+// cover the Kubernetes SPIFFE ID shape spiffe://<td>/ns/<ns>/sa/<sa>. An ID of
+// another shape yields "" for ns and sa rather than an error. Patterns see the
+// ID without "spiffe://".
 var DefaultAttributes = map[string]string{
-	"trust_domain": `spiffe://([^/]+)(?:/.*)?`,
-	"ns":           `spiffe://[^/]+/ns/([^/]+)/sa/[^/]+`,
-	"sa":           `spiffe://[^/]+/ns/[^/]+/sa/([^/]+)`,
+	"ns": `[^/]+/ns/([^/]+)/sa/[^/]+`,
+	"sa": `[^/]+/ns/[^/]+/sa/([^/]+)`,
 }
 
 // cedarIdent is what Cedar accepts after `principal.`.
@@ -242,8 +296,18 @@ func (c *Config) AttributeRules() (map[string]*regexp.Regexp, error) {
 			errs = append(errs, fmt.Errorf("attributes: %q is not a usable Cedar attribute name", name))
 			continue
 		}
-		// Anchor both ends so a rule matches the whole ID, never a substring
-		// of a lookalike path.
+		// Patterns see the ID without "spiffe://"; drop a leading copy so
+		// either spelling works. Anchor both ends so a rule matches the whole
+		// ID, never a substring of a lookalike path.
+		if name == TrustDomainAttribute {
+			errs = append(errs, fmt.Errorf("attributes.%s: trust_domain is set from the SPIFFE ID and cannot be overridden", name))
+			continue
+		}
+		pattern = strings.TrimPrefix(pattern, SPIFFEScheme)
+		if strings.Contains(pattern, "spiffe:") {
+			errs = append(errs, fmt.Errorf("attributes.%s: patterns see the ID without spiffe://; remove it from the pattern", name))
+			continue
+		}
 		re, err := regexp.Compile(`^(?:` + pattern + `)$`)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("attributes.%s: %w", name, err))

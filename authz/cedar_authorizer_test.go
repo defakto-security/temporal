@@ -8,7 +8,6 @@ import (
 
 	cedar "github.com/cedar-policy/cedar-go"
 	"github.com/cedar-policy/cedar-go/types"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/log"
@@ -39,9 +38,8 @@ func newTestAuthorizer(t *testing.T, policy string) *CedarAuthorizer {
 	require.NoError(t, os.WriteFile(path, []byte(policy), 0o600))
 
 	cfg := &spiffeconfig.Config{
-		Version:     spiffeconfig.SchemaVersion,
-		TrustDomain: "corp.defakto.security",
-		PolicyPath:  path,
+		Version:    spiffeconfig.SchemaVersion,
+		PolicyPath: path,
 	}
 	a, err := NewCedarAuthorizer(cfg, log.NewNoopLogger())
 	require.NoError(t, err)
@@ -163,7 +161,7 @@ permit (
   principal in RoleClass::"service",
   action in [Action::"start-signal", Action::"worker"],
   resource == Namespace::"shared"
-) when { principal.ns == "billing" };
+) when { principal.trust_domain == "corp.defakto.security" && principal.ns == "billing" };
 forbid (principal, action == Action::"forbidden-all", resource);
 `
 
@@ -205,7 +203,6 @@ func TestAuthorize_MalformedSubjectDenied(t *testing.T) {
 	a := newTestAuthorizer(t, loadReferencePolicy(t))
 
 	for _, subject := range []string{"", "test", "https://corp.defakto.security/ns/a/sa/b", "spiffe:///ns/a/sa/b", "spiffe://td/ns/a/sa/b?x=1",
-		"spiffe://other.example/ns/payments/sa/worker", // foreign trust domain
 		"spiffe://corp.defakto.security:443/ns/a/sa/b", // port
 		"spiffe://CORP.defakto.security/ns/a/sa/b",     // uppercase trust domain
 		svcID + "/", // trailing slash
@@ -225,9 +222,7 @@ func mustRules(t *testing.T, attrs map[string]string) attributeRules {
 	cfg := &spiffeconfig.Config{Attributes: attrs}
 	m, err := cfg.AttributeRules()
 	require.NoError(t, err)
-	td, err := spiffeid.TrustDomainFromString("corp.defakto.security")
-	require.NoError(t, err)
-	return newAttributeRules(m, td)
+	return newAttributeRules(m)
 }
 
 // attrOf is a test helper or test case in this package.
@@ -276,10 +271,10 @@ func TestAuthorize_CustomAttributeInPolicy(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.cedar")
 	policy := `permit (principal in RoleClass::"service", action in [Action::"start-signal"], resource)
-	  when { principal.nameSpace == "payments" };`
+	  when { principal.trust_domain == "corp.defakto.security" && principal.nameSpace == "payments" };`
 	require.NoError(t, os.WriteFile(path, []byte(policy), 0o600))
 	cfg := &spiffeconfig.Config{
-		Version: spiffeconfig.SchemaVersion, TrustDomain: "corp.defakto.security", PolicyPath: path,
+		Version: spiffeconfig.SchemaVersion, PolicyPath: path,
 		Attributes: map[string]string{"nameSpace": `.*/ns/([^/]+)/.*`},
 	}
 	a, err := NewCedarAuthorizer(cfg, log.NewNoopLogger())
@@ -298,7 +293,7 @@ func TestAuthorize_CustomAttributeInPolicy(t *testing.T) {
 // the authorizer turns into a deny (never an allow).
 func TestAuthorize_UndefinedAttributeDenies(t *testing.T) {
 	t.Parallel()
-	a := newTestAuthorizer(t, `permit (principal, action, resource) when { principal.nameSpace == "payments" };`)
+	a := newTestAuthorizer(t, `permit (principal, action, resource) when { principal.trust_domain == "corp.defakto.security" && principal.nameSpace == "payments" };`)
 	res, err := a.Authorize(context.Background(), claimsFor(svcID, authn.RoleClassService), target(svc+"StartWorkflowExecution"))
 	require.NoError(t, err)
 	require.Equal(t, authorization.DecisionDeny, res.Decision)
@@ -321,7 +316,7 @@ func TestPolicyLoad_RejectsLegacyRoleClassScope(t *testing.T) {
 	} {
 		path := filepath.Join(t.TempDir(), "policy.cedar")
 		require.NoError(t, os.WriteFile(path, []byte(pol), 0o600))
-		cfg := &spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, TrustDomain: "corp.defakto.security", PolicyPath: path}
+		cfg := &spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, PolicyPath: path}
 		_, err := NewCedarAuthorizer(cfg, log.NewNoopLogger())
 		require.ErrorContains(t, err, "principal in RoleClass")
 	}
@@ -337,7 +332,7 @@ func TestPolicyLoad_RejectsLegacyRoleClassCondition(t *testing.T) {
 	} {
 		path := filepath.Join(t.TempDir(), "policy.cedar")
 		require.NoError(t, os.WriteFile(path, []byte(pol), 0o600))
-		cfg := &spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, TrustDomain: "corp.defakto.security", PolicyPath: path}
+		cfg := &spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, PolicyPath: path}
 		_, err := NewCedarAuthorizer(cfg, log.NewNoopLogger())
 		require.ErrorContains(t, err, "principal in RoleClass", pol)
 	}
@@ -348,4 +343,20 @@ func TestPrincipalEntities_PathlessTrustDomain(t *testing.T) {
 	t.Parallel()
 	r := mustRules(t, nil)
 	require.Equal(t, types.String("corp.defakto.security"), attrOf(t, r, "spiffe://corp.defakto.security", "trust_domain"))
+}
+
+// TestAuthorize_ForeignTrustDomain: a federated caller is well formed, so it
+// reaches the policy, and the reference policy (scoped by trust_domain) denies it.
+func TestAuthorize_ForeignTrustDomain(t *testing.T) {
+	t.Parallel()
+	a := newTestAuthorizer(t, loadReferencePolicy(t))
+	foreign := "spiffe://partner.example.net/ns/payments/sa/worker"
+	for _, class := range []authn.RoleClass{authn.RoleClassService, authn.RoleClassHuman} {
+		res, err := a.Authorize(context.Background(), claimsFor(foreign, class), target(svc+"StartWorkflowExecution"))
+		require.NoError(t, err)
+		require.Equal(t, authorization.DecisionDeny, res.Decision)
+	}
+	home, err := a.Authorize(context.Background(), claimsFor(svcID, authn.RoleClassService), target(svc+"StartWorkflowExecution"))
+	require.NoError(t, err)
+	require.Equal(t, authorization.DecisionAllow, home.Decision)
 }

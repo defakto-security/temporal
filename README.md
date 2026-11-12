@@ -26,6 +26,55 @@ decision = f(role_class, namespace, verb_class)
   unparseable, or invalid policy. The shipped `reference/policy.cedar` forbids
   the destruction verbs by default.
 
+## Trust boundaries to know
+
+- Any trust domain the SPIFFE agent holds a bundle for (federated ones too) can
+  authenticate. Every `permit` must scope `principal.trust_domain` (or name one
+  exact Workload); the policy loader rejects one that does not.
+  `trust_domain` is read from the SPIFFE ID and cannot be overridden.
+- A JWT-SVID is a bearer token. Serve the frontend over TLS and give each
+  cluster its own `workloadAPI.audience`. A token with more than one audience
+  is refused.
+- `identityMode: observe` lets callers without a valid identity through (the
+  forbidden-all and break-glass verbs stay denied). It is a rollout aid.
+- Temporal's own services (worker, scheduler) carry no JWT-SVID. Set
+  `clientCertAuth: true` to identify them by their X.509-SVID client cert
+  (URI SAN = SPIFFE ID). Any `authorization` header, even blank, wins and is
+  never rescued by a cert. Two checks must both pass, else the caller is unknown:
+  1. Temporal's TLS verifies the chain (`requireClientAuth` + `clientCaFiles`).
+  2. The mapper verifies the cert again against the Workload API X.509 roots
+     of the trust domain in its own SAN. A merged CA file cannot bind a SAN
+     to its domain, so without this step any root in it could mint an ID in
+     any trust domain. It also checks: not a CA, one canonical URI SAN, in
+     date, digitalSignature. No OCSP/CRL: rely on short-lived SVIDs.
+
+```yaml
+# Temporal server config (not config.yaml)
+global:
+  tls:
+    refreshInterval: 1m              # reload cert and CA files as they rotate
+    frontend:
+      server:
+        certFile: /spiffe/svid.pem
+        keyFile: /spiffe/svid.key
+        requireClientAuth: true
+        clientCaFiles: [/spiffe/bundle.pem]   # the Defakto X.509 bundle
+    systemWorker:                    # the worker and scheduler present this
+      certFile: /spiffe/svid.pem
+      keyFile: /spiffe/svid.key
+      client:
+        rootCaFiles: [/spiffe/bundle.pem]
+```
+
+  `requireClientAuth: true` refuses any client without a cert during the TLS
+  handshake, before a header is read. JWT-only callers (people, CLI) then
+  cannot connect to that listener. Keep them on a listener without
+  `requireClientAuth`, and give the worker and scheduler the mTLS one
+  (`internal-frontend`). A caller that reaches a listener with no
+  `requireClientAuth` has no verified chain, so its cert is ignored. Keep the
+  bundle file fresh (for example with spiffe-helper); a stale file rejects good
+  callers. Check both listeners in observe mode before you enforce.
+
 ## Layout
 
 ```

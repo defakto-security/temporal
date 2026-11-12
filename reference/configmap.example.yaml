@@ -8,24 +8,52 @@ data:
   # The module config contract (see config/config.go).
   config.yaml: |
     version: 1
-    trustDomain: corp.defakto.security
-    # Leading literal segment is the human/service prefix test key.
-    devIDTemplate: "/users/{domain}/{username}"
+    # Callers send a JWT-SVID in the `authorization` header. It is checked
+    # against bundles the local SPIFFE agent streams over the Workload API (no
+    # call per request). Every trust domain the agent holds a bundle for can
+    # authenticate; policy.cedar decides what each may do (principal.trust_domain).
+    workloadAPI:
+      # default: the SPIFFE_ENDPOINT_SOCKET env var
+      address: unix:///spiffe-workload-api/spire-agent.sock
+      # Clients must request exactly this one audience. Make it unique per
+      # cluster, so a token for staging is useless on prod. A JWT-SVID is a
+      # bearer token: serve the frontend over TLS.
+      audience: temporal/prod-example
+    # Temporal's own services (worker, scheduler) dial the frontend over mTLS
+    # and send no header. true: with no header, identify the caller by its
+    # client cert, an X.509-SVID with one canonical SPIFFE ID as URI SAN. A
+    # header always wins. Temporal's TLS must verify the chain (see the README
+    # tls example); the mapper then checks the cert against the roots of its
+    # own trust domain from the Workload API. No verified chain: the cert is
+    # ignored. Default false.
+    # clientCertAuth: true
+    # Human = the whole ID fits this template. Each {name} is one path segment.
+    # The full form pins one trust domain. A path-only form such as
+    # "/users/{domain}/{username}" matches the path in ANY trust domain, and is
+    # refused unless you set humanFromAnyTrustDomain: true. Empty: nobody is human.
+    devIDTemplate: "spiffe://corp.defakto.security/users/{domain}/{username}"
+    # humanFromAnyTrustDomain: true
+    # Optional. Only IDs that fit this template are services; any other
+    # authenticated ID gets no role class and is denied. Empty: everything that
+    # is not human is a service.
+    # serviceIDTemplate: "spiffe://corp.defakto.security/ns/{ns}/sa/{sa}"
     # Milestone 2 (Temporal Web): portal-issued OIDC verification.
     human:
       issuer: https://devportal.corp.defakto.security/
       audience: temporal
       jwksURL: https://devportal.corp.defakto.security/.well-known/jwks.json
     # Principal attributes a policy can read as `principal.<name>`. Defaults
-    # (shown) parse spiffe://<td>/ns/<ns>/sa/<sa>. Add your own, or override a
+    # (shown) parse spiffe://<td>/ns/<ns>/sa/<sa>. trust_domain is always the ID's
+    # own trust domain and cannot be set here. Add your own, or override a
     # default by reusing its name. Each value is an RE2 regex with exactly ONE
-    # capture group. A pattern is anchored at both ends and must match the WHOLE
-    # SPIFFE ID (use `.*` for the parts you ignore). No match gives "".
+    # capture group, matched against the ID WITHOUT "spiffe://" (a leading
+    # "spiffe://" is stripped). A pattern is anchored at both ends and must match
+    # the whole rest of the ID (use `.*` for the parts you ignore). No match
+    # gives "".
     # attributes:
-    #   trust_domain: 'spiffe://([^/]+)(?:/.*)?'
-    #   ns:           'spiffe://[^/]+/ns/([^/]+)/sa/[^/]+'
-    #   sa:           'spiffe://[^/]+/ns/[^/]+/sa/([^/]+)'
-    #   nameSpace:    'spiffe://[^/]+/k8s/([^/]+)/.*'
+    #   ns:           '[^/]+/ns/([^/]+)/sa/[^/]+'
+    #   sa:           '[^/]+/ns/[^/]+/sa/([^/]+)'
+    #   nameSpace:    '[^/]+/k8s/([^/]+)/.*'
     # Passwordless Postgres on RDS (IRSA). Needs pluginName postgres12_pgx, TLS
     # with enableHostVerification and caFile (the RDS CA bundle), connectAddr =
     # the RDS endpoint as host:port, and no password in Temporal's own
@@ -40,8 +68,8 @@ data:
     # decision with principal, attributes, namespace, API and verb.
     # decisionLog: all
     # identityMode: enforce (default) | observe. Before any policy runs, a call
-    # needs an authenticated caller with a role class and a canonical SPIFFE ID
-    # in trustDomain. "observe" lets a call that fails these through and logs
+    # needs an authenticated caller with a role class and a canonical SPIFFE ID.
+    # "observe" lets a call that fails these through and logs
     # as `would_deny`, and counts it as decision="allow" with a reason (unauthenticated,
     # unknown_role_class, malformed_subject). Run it until none appear, then
     # switch to enforce. Policy decisions are always enforced, and forbidden-all,
@@ -58,7 +86,14 @@ data:
   # (destruction verbs forbidden by default); edit to set your own floor.
   policy.cedar: |
     permit (principal in RoleClass::"service",
-            action in [Action::"start-signal", Action::"worker"], resource);
+            action in [Action::"start-signal", Action::"worker"], resource)
+      when { principal.trust_domain == "corp.defakto.security" };
+    // Temporal's own worker (clientCertAuth).
+    permit (principal in RoleClass::"service",
+            action in [Action::"start-signal", Action::"worker", Action::"read-only"], resource)
+      when { principal.trust_domain == "corp.defakto.security" &&
+             principal.ns == "temporal" && principal.sa == "temporal-worker" };
     permit (principal in RoleClass::"human",
-            action == Action::"read-only", resource);
+            action == Action::"read-only", resource)
+      when { principal.trust_domain == "corp.defakto.security" };
     forbid (principal, action == Action::"forbidden-all", resource);
