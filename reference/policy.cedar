@@ -31,6 +31,18 @@ permit (
   resource
 ) when { principal.trust_domain == "corp.defakto.security" };
 
+// --- Temporal's own services (clientCertAuth) ------------------------------
+// The internal worker and scheduler dial the frontend with an X.509-SVID client
+// cert and no header. Needed when you narrow the broad service permit above.
+permit (
+  principal in RoleClass::"service",
+  action in [Action::"start-signal", Action::"worker", Action::"read-only"],
+  resource
+) when {
+  principal.trust_domain == "corp.defakto.security" &&
+  principal.ns == "temporal" && principal.sa == "temporal-worker"
+};
+
 // --- per-workload scoping (example) ---------------------------------------
 // To confine a workload to its own namespace, replace the broad service permit
 // above with permits like this one, one per workload family:

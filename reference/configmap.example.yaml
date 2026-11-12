@@ -19,6 +19,14 @@ data:
       # cluster, so a token for staging is useless on prod. A JWT-SVID is a
       # bearer token: serve the frontend over TLS.
       audience: temporal/prod-example
+    # Temporal's own services (worker, scheduler) dial the frontend over mTLS
+    # and send no header. true: with no header, identify the caller by its
+    # client cert, an X.509-SVID with one canonical SPIFFE ID as URI SAN. A
+    # header always wins. Temporal's TLS must verify the chain (see the README
+    # tls example); the mapper then checks the cert against the roots of its
+    # own trust domain from the Workload API. No verified chain: the cert is
+    # ignored. Default false.
+    # clientCertAuth: true
     # Human = the whole ID fits this template. Each {name} is one path segment.
     # The full form pins one trust domain. A path-only form such as
     # "/users/{domain}/{username}" matches the path in ANY trust domain, and is
@@ -80,6 +88,11 @@ data:
     permit (principal in RoleClass::"service",
             action in [Action::"start-signal", Action::"worker"], resource)
       when { principal.trust_domain == "corp.defakto.security" };
+    // Temporal's own worker (clientCertAuth).
+    permit (principal in RoleClass::"service",
+            action in [Action::"start-signal", Action::"worker", Action::"read-only"], resource)
+      when { principal.trust_domain == "corp.defakto.security" &&
+             principal.ns == "temporal" && principal.sa == "temporal-worker" };
     permit (principal in RoleClass::"human",
             action == Action::"read-only", resource)
       when { principal.trust_domain == "corp.defakto.security" };
