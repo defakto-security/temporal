@@ -34,6 +34,9 @@ func TestPolicyLoad_RejectsUnscopedPermit(t *testing.T) {
 		`permit (principal in RoleClass::"service", action, resource);`,
 		`permit (principal, action, resource) when { principal.ns == "payments" };`,
 		`permit (principal in RoleClass::"human", action, resource) when { principal.sa == "x" };`,
+		`permit (principal, action, resource) when { context.trust_domain == "corp.defakto.security" };`,
+		`permit (principal, action, resource) when { resource.trust_domain == "corp.defakto.security" };`,
+		`permit (principal, action, resource) when { {"trust_domain": "x"}.trust_domain == "x" };`,
 	} {
 		require.ErrorContains(t, loadPolicy(t, pol), "principal.trust_domain", pol)
 	}

@@ -171,7 +171,7 @@ func TestIDMatcher(t *testing.T) {
 
 func TestIDTemplate_Errors(t *testing.T) {
 	t.Parallel()
-	for _, tmpl := range []string{"users/{x}", "/", "/users{x}", "/users/", "/users/{x", "/users/x}", "spiffe://Bad_TD!/users/{x}", "spiffe://td", "spiffe://{td}/users/{x}"} {
+	for _, tmpl := range []string{"users/{x}", "/", "/users{x}", "/users/", "/users/{x", "/users/x}", "/users/{x}/", "/users/{x}//y", "/users/{a}{b}", "/users/x-{a}", "/users/{a}-y", "/users/{a}/./{b}", "spiffe://Bad_TD!/users/{x}", "spiffe://td", "spiffe://{td}/users/{x}"} {
 		_, err := (&Config{ServiceIDTemplate: tmpl}).ServiceMatcher()
 		require.Error(t, err, tmpl)
 	}

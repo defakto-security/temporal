@@ -99,6 +99,19 @@ func compileIDTemplate(name, tmpl string) (IDMatcher, bool, error) {
 		return m, false, errors.New(name + ": the literal prefix must be longer than /, or every ID would match")
 	}
 
+	// Each placeholder must fill a whole path segment, so "{a}{b}" or
+	// "/x-{a}" cannot split a segment between two matchers.
+	for _, loc := range locs {
+		if path[loc[0]-1] != '/' || (loc[1] < len(path) && path[loc[1]] != '/') {
+			return m, false, fmt.Errorf("%s %q: each {placeholder} must be a whole path segment", name, tmpl)
+		}
+	}
+	// A template whose expansion is not a valid SPIFFE path (a trailing "/",
+	// an empty or dot segment) could never match any ID. Refuse it at load.
+	if err := spiffeid.ValidatePath(placeholder.ReplaceAllString(path, "x")); err != nil {
+		return m, false, fmt.Errorf("%s %q: not a valid SPIFFE ID path: %w", name, tmpl, err)
+	}
+
 	var b strings.Builder
 	b.WriteString("^")
 	last := 0

@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.7.12
 	github.com/cedar-policy/cedar-go v1.8.0
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/iancoleman/strcase v0.3.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jmoiron/sqlx v1.4.0

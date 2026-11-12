@@ -94,18 +94,25 @@ func requireTrustDomainScope(ps *cedar.PolicySet) error {
 }
 
 // conditionsReadTrustDomain reports whether any when/unless body reads
-// principal.trust_domain.
+// principal.trust_domain. The receiver must be the principal variable itself:
+// `context.trust_domain` or a record literal's field does not count.
 func conditionsReadTrustDomain(conds []ast.ConditionType) bool {
 	found := false
 	for _, c := range conds {
 		ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
-			if t, ok := n.(ast.NodeTypeAccess); ok && string(t.Value) == spiffeconfig.TrustDomainAttribute {
+			if t, ok := n.(ast.NodeTypeAccess); ok && string(t.Value) == spiffeconfig.TrustDomainAttribute && isPrincipalVar(t.Arg) {
 				found = true
 			}
 			return !found
 		})
 	}
 	return found
+}
+
+// isPrincipalVar reports whether n is the `principal` variable.
+func isPrincipalVar(n ast.IsNode) bool {
+	v, ok := n.(ast.NodeTypeVariable)
+	return ok && v.Name == "principal"
 }
 
 // rejectLegacyPrincipalScopes refuses a policy whose principal scope is
