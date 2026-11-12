@@ -26,6 +26,21 @@ decision = f(role_class, namespace, verb_class)
   unparseable, or invalid policy. The shipped `reference/policy.cedar` forbids
   the destruction verbs by default.
 
+## Trust boundaries to know
+
+- Any trust domain the SPIFFE agent holds a bundle for (federated ones too) can
+  authenticate. Every `permit` must scope `principal.trust_domain` (or name one
+  exact Workload); the policy loader rejects one that does not.
+  `trust_domain` is read from the SPIFFE ID and cannot be overridden.
+- A JWT-SVID is a bearer token. Serve the frontend over TLS and give each
+  cluster its own `workloadAPI.audience`. A token with more than one audience
+  is refused.
+- `identityMode: observe` lets callers without a valid identity through (the
+  forbidden-all and break-glass verbs stay denied). It is a rollout aid.
+- Temporal's own services (worker, scheduler) carry no JWT-SVID, so enforce
+  mode can deny them. How they reach the frontend (`internal-frontend` or
+  not) is not tested here. Check it in observe mode before you enforce.
+
 ## Layout
 
 ```

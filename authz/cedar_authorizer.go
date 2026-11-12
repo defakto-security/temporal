@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 
 	cedar "github.com/cedar-policy/cedar-go"
@@ -91,17 +92,13 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 	if err != nil {
 		return nil, err
 	}
-	td, err := spiffeid.TrustDomainFromString(cfg.TrustDomain)
-	if err != nil {
-		return nil, fmt.Errorf("trustDomain %q: %w", cfg.TrustDomain, err)
-	}
 	ps, err := newPolicySource(cfg.PolicyPath, logger)
 	if err != nil {
 		return nil, err
 	}
 	a := &CedarAuthorizer{
 		policies:    ps,
-		attrs:       newAttributeRules(rules, td),
+		attrs:       newAttributeRules(rules),
 		logger:      logger,
 		metrics:     metrics.NoopMetricsHandler,
 		decisionLog: cfg.DecisionLog,
@@ -424,19 +421,18 @@ func attributesOf(entities types.EntityMap, uid types.EntityUID) map[string]stri
 // attributeRules is the compiled attribute mapping, in a fixed order so the
 // entity record is built the same way every time.
 type attributeRules struct {
-	td    spiffeid.TrustDomain
 	names []string
 	res   []*regexp.Regexp
 }
 
-// newAttributeRules anchors each pattern and binds the configured trust domain.
-func newAttributeRules(m map[string]*regexp.Regexp, td spiffeid.TrustDomain) attributeRules {
+// newAttributeRules orders the compiled patterns by attribute name.
+func newAttributeRules(m map[string]*regexp.Regexp) attributeRules {
 	names := make([]string, 0, len(m))
 	for n := range m {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	r := attributeRules{td: td, names: names, res: make([]*regexp.Regexp, len(names))}
+	r := attributeRules{names: names, res: make([]*regexp.Regexp, len(names))}
 	for i, n := range names {
 		r.res[i] = m[n]
 	}
@@ -454,20 +450,25 @@ func newAttributeRules(m map[string]*regexp.Regexp, td spiffeid.TrustDomain) att
 // Write deny rules as allow-lists: `forbid ... when { principal.ns == "prod" }`
 // does not fire for an ID whose ns is "".
 //
-// The subject must already be a canonical SPIFFE ID in the configured trust
-// domain. Anything else (a port, uppercase, a trailing slash, escapes, empty or
-// dot segments, another trust domain) is rejected, so one workload can never
-// appear under two Workload entities.
+// The subject must already be a canonical SPIFFE ID. Anything else (a port,
+// uppercase, a trailing slash, escapes, empty or dot segments) is rejected, so
+// one workload can never appear under two Workload entities. Which trust
+// domains may do what is the policy's job (`principal.trust_domain`, which is the
+// ID's own trust domain and cannot be overridden). Patterns
+// run against the ID without "spiffe://".
 func (r attributeRules) principalEntities(subject string, class authn.RoleClass) (types.EntityUID, types.EntityMap, bool) {
 	id, err := spiffeid.FromString(subject)
-	if err != nil || id.String() != subject || id.TrustDomain() != r.td {
+	if err != nil || id.String() != subject {
 		return types.EntityUID{}, nil, false
 	}
 
-	attrs := make(types.RecordMap, len(r.names))
+	// trust_domain comes from the parsed ID, not a pattern: policies rely on
+	// it as the boundary between trust domains.
+	attrs := make(types.RecordMap, len(r.names)+1)
+	attrs[types.String(spiffeconfig.TrustDomainAttribute)] = types.String(id.TrustDomain().Name())
 	for i, name := range r.names {
 		var val string
-		if m := r.res[i].FindStringSubmatch(subject); m != nil {
+		if m := r.res[i].FindStringSubmatch(strings.TrimPrefix(subject, spiffeconfig.SPIFFEScheme)); m != nil {
 			val = m[1]
 		}
 		attrs[types.String(name)] = types.String(val)

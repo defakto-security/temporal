@@ -122,7 +122,6 @@ func newAuthorizerWith(t *testing.T, live, shadow, level, identityMode string) (
 	h := &countingHandler{Handler: metrics.NoopMetricsHandler}
 	cfg := &spiffeconfig.Config{
 		Version:     spiffeconfig.SchemaVersion,
-		TrustDomain: "corp.defakto.security",
 		PolicyPath:  writePolicy(t, live),
 		DecisionLog: level,
 
@@ -173,7 +172,7 @@ func TestShadow_LiveAllowsCandidateDenies(t *testing.T) {
 func TestShadow_CandidateErrorDoesNotChangeLive(t *testing.T) {
 	t.Parallel()
 	// Reads an attribute that does not exist: Cedar errors on it.
-	broken := `permit (principal, action, resource) when { principal.nope == "x" };`
+	broken := `permit (principal, action, resource) when { principal.trust_domain == "corp.defakto.security" && principal.nope == "x" };`
 	a, logger, _ := newShadowAuthorizer(t, loadReferencePolicy(t), broken, spiffeconfig.DecisionLogOff)
 
 	res := call(t, a, svcID, "payments")
@@ -212,7 +211,6 @@ func TestShadow_BadCandidatePathFailsStart(t *testing.T) {
 	t.Parallel()
 	cfg := &spiffeconfig.Config{
 		Version:          spiffeconfig.SchemaVersion,
-		TrustDomain:      "corp.defakto.security",
 		PolicyPath:       writePolicy(t, loadReferencePolicy(t)),
 		ShadowPolicyPath: filepath.Join(t.TempDir(), "missing.cedar"),
 	}
@@ -258,9 +256,9 @@ func TestDecisionLog_FieldsOnDeny(t *testing.T) {
 
 func TestConfig_ShadowValidation(t *testing.T) {
 	t.Parallel()
-	c := spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, TrustDomain: "td", PolicyPath: "/p", ShadowPolicyPath: "/p"}
+	c := spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, PolicyPath: "/p", ShadowPolicyPath: "/p"}
 	require.ErrorContains(t, c.Validate(), "must differ")
-	c = spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, TrustDomain: "td", PolicyPath: "/p", DecisionLog: "loud"}
+	c = spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, PolicyPath: "/p", DecisionLog: "loud"}
 	require.ErrorContains(t, c.Validate(), "decisionLog")
 }
 
@@ -274,7 +272,7 @@ func TestIdentityMode_ObserveAllowsAndReports(t *testing.T) {
 	}{
 		{"nil caller", nil, svc + "StartWorkflowExecution", reasonUnauthenticated},
 		{"no role class", &authorization.Claims{Subject: svcID, Extensions: authn.RoleClassUnknown}, svc + "StartWorkflowExecution", reasonUnknownRoleClass},
-		{"bad subject", claimsFor("spiffe://other.example/ns/a/sa/b", authn.RoleClassService), svc + "StartWorkflowExecution", reasonMalformedSubject},
+		{"bad subject", claimsFor("spiffe://other.example:443/ns/a/sa/b", authn.RoleClassService), svc + "StartWorkflowExecution", reasonMalformedSubject},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -311,7 +309,7 @@ func TestIdentityMode_ObserveStillEnforcesPolicy(t *testing.T) {
 
 func TestConfig_IdentityModeValidation(t *testing.T) {
 	t.Parallel()
-	c := spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, TrustDomain: "td", PolicyPath: "/p", IdentityMode: "lax"}
+	c := spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, PolicyPath: "/p", IdentityMode: "lax"}
 	require.ErrorContains(t, c.Validate(), "identityMode")
 }
 

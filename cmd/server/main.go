@@ -17,7 +17,9 @@ import (
 	"fmt"
 	stdlog "log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	// Persistence plugins the stock server loads; a custom main must import
@@ -73,6 +75,26 @@ func run() error {
 		return err
 	}
 
+	// JWT-SVID verification keys stream from the local SPIFFE agent. Only the
+	// services that take client calls need them; a history or matching pod
+	// runs without an agent. Wait for the first bundles so the server never
+	// starts unable to verify anyone. A SIGTERM during the wait ends it.
+	verifier := authn.DenyAllVerifier()
+	if takesClientCalls(servicesToStart()) {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		v, closeVerifier, err := authn.WorkloadAPIVerifier(ctx, appCfg.WorkloadAPI, 30*time.Second)
+		stop()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = closeVerifier() }()
+		verifier = v
+	}
+	claimMapper, err := authn.NewClaimMapper(appCfg, verifier, logger)
+	if err != nil {
+		return err
+	}
+
 	// The Cedar authorizer loads + validates the customer-owned policy and
 	// fails closed on an absent, unparseable, or schema-invalid policy.
 	authorizer, err := authz.NewCedarAuthorizer(appCfg, logger)
@@ -118,7 +140,7 @@ func run() error {
 		temporal.WithCustomMetricsHandler(metricsHandler),
 		temporal.WithAuthorizer(authorizer),
 		temporal.WithClaimMapper(func(*config.Config) authorization.ClaimMapper {
-			return authn.NewClaimMapper(appCfg, logger)
+			return claimMapper
 		}),
 	}
 	s, err := temporal.NewServer(append(opts, iamOpts...)...)
@@ -192,6 +214,17 @@ func temporalConfigDir() string {
 		return dir
 	}
 	return "config"
+}
+
+// takesClientCalls reports whether any named service accepts client calls, and
+// so runs the claim mapper against real tokens.
+func takesClientCalls(services []string) bool {
+	for _, s := range services {
+		if s == "frontend" || s == "internal-frontend" {
+			return true
+		}
+	}
+	return false
 }
 
 // servicesToStart returns the service names this process should run. It reads

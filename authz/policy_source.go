@@ -11,6 +11,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
+
+	spiffeconfig "github.com/defakto-security/temporal/config"
 )
 
 // policySource loads the customer-owned Cedar policy from a file and hot-reloads
@@ -60,8 +62,50 @@ func (s *policySource) reload() error {
 	if err := rejectLegacyPrincipalScopes(ps); err != nil {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
+	if err := requireTrustDomainScope(ps); err != nil {
+		return fmt.Errorf("policy %q: %w", s.path, err)
+	}
 	s.current.Store(ps)
 	return nil
+}
+
+// requireTrustDomainScope refuses a permit that does not mention
+// principal.trust_domain, unless it names one exact Workload. Any trust domain
+// the SPIFFE agent holds a bundle for (federated ones too) can authenticate,
+// so an unscoped permit would admit all of them. This is a guard against
+// forgetting the scope, not a proof: it checks that the condition reads the
+// attribute, not what the condition does with it.
+func requireTrustDomainScope(ps *cedar.PolicySet) error {
+	for id, p := range ps.All() {
+		a := p.AST()
+		if a.Effect != ast.EffectPermit {
+			continue
+		}
+		if sc, ok := a.Principal.(ast.ScopeTypeEq); ok && sc.Entity.Type == entityWorkload {
+			continue
+		}
+		if !conditionsReadTrustDomain(a.Conditions) {
+			return fmt.Errorf("policy %s is a permit that does not scope principal.trust_domain; "+
+				"add `when { principal.trust_domain == \"<your trust domain>\" }` "+
+				"(federated trust domains can authenticate, so an unscoped permit admits them)", id)
+		}
+	}
+	return nil
+}
+
+// conditionsReadTrustDomain reports whether any when/unless body reads
+// principal.trust_domain.
+func conditionsReadTrustDomain(conds []ast.ConditionType) bool {
+	found := false
+	for _, c := range conds {
+		ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
+			if t, ok := n.(ast.NodeTypeAccess); ok && string(t.Value) == spiffeconfig.TrustDomainAttribute {
+				found = true
+			}
+			return !found
+		})
+	}
+	return found
 }
 
 // rejectLegacyPrincipalScopes refuses a policy whose principal scope is

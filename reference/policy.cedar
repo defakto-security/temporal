@@ -10,8 +10,13 @@
 //               Attributes: principal.trust_domain, principal.ns, principal.sa by default
 //               (ns and sa are "" when the ID is not /ns/<ns>/sa/<sa>).
 //               Add or override attributes with `attributes:` in config.yaml.
-//               Only IDs in the configured trust domain, in canonical form, are
-//               accepted; anything else is denied. A policy that still scopes the
+//               trust_domain is the ID's own trust domain; config cannot change it.
+//               Any trust domain the SPIFFE agent holds a bundle for (including
+//               federated ones) can authenticate, so EVERY PERMIT MUST SCOPE
+//               principal.trust_domain, as below (or name one exact Workload).
+//               A permit that does not is rejected at load. IDs not in
+//               canonical form are denied.
+//               A policy that still scopes the
 //               principal with `== RoleClass::"x"` is rejected at load.
 //               Write denies as allow-lists: `forbid ... when { principal.ns ==
 //               "prod" }` does not fire when ns is "" (an ID of another shape).
@@ -24,7 +29,7 @@ permit (
   principal in RoleClass::"service",
   action in [Action::"start-signal", Action::"worker"],
   resource
-);
+) when { principal.trust_domain == "corp.defakto.security" };
 
 // --- per-workload scoping (example) ---------------------------------------
 // To confine a workload to its own namespace, replace the broad service permit
@@ -34,9 +39,9 @@ permit (
 //   principal in RoleClass::"service",
 //   action in [Action::"start-signal", Action::"worker"],
 //   resource == Namespace::"payments"
-// ) when { principal.ns == "payments" };
+// ) when { principal.trust_domain == "corp.defakto.security" && principal.ns == "payments" };
 //
-// Or name one exact identity:
+// Or name one exact identity (the ID includes its trust domain):
 //   principal == Workload::"spiffe://corp.example/ns/payments/sa/worker"
 
 // --- human -----------------------------------------------------------------
@@ -46,7 +51,7 @@ permit (
   principal in RoleClass::"human",
   action == Action::"read-only",
   resource
-);
+) when { principal.trust_domain == "corp.defakto.security" };
 
 // break-glass (Terminate / RequestCancel / Reset) for humans.
 //
