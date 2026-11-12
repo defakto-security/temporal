@@ -41,6 +41,16 @@ type Config struct {
 	// trust domain may do, through `principal.trust_domain`.
 	WorkloadAPI WorkloadAPIConfig `yaml:"workloadAPI"`
 
+	// ClientCertAuth lets a caller with no `authorization` header be identified
+	// by its mTLS client certificate, if that is an X.509-SVID with one
+	// canonical SPIFFE ID as its URI SAN. Temporal's worker and scheduler need
+	// this, as they dial the frontend over mTLS only. A header always wins.
+	// Temporal's TLS must verify the chain (tls.frontend.server.requireClientAuth
+	// and clientCaFiles); the mapper then checks the cert against the roots of
+	// its own trust domain, from the Workload API. Without a verified chain the
+	// cert is ignored. Default off.
+	ClientCertAuth bool `yaml:"clientCertAuth"`
+
 	// DevIDTemplate is the SPIFFE ID template for human identities. An ID is
 	// human only if its whole path fits the template: each {placeholder} is one
 	// non-empty path segment. Write the full form,

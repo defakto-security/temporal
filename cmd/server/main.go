@@ -30,6 +30,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
@@ -90,7 +91,21 @@ func run() error {
 		defer func() { _ = closeVerifier() }()
 		verifier = v
 	}
-	claimMapper, err := authn.NewClaimMapper(appCfg, verifier, logger)
+	var mapperOpts []authn.Option
+	if appCfg.ClientCertAuth && !takesClientCalls(servicesToStart()) {
+		// No client calls here, so no cert is ever read: an empty set suffices.
+		mapperOpts = append(mapperOpts, authn.WithX509Bundles(x509bundle.NewSet()))
+	} else if appCfg.ClientCertAuth {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		b, closeBundles, err := authn.WorkloadAPIX509Bundles(ctx, appCfg.WorkloadAPI, 30*time.Second)
+		stop()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = closeBundles() }()
+		mapperOpts = append(mapperOpts, authn.WithX509Bundles(b))
+	}
+	claimMapper, err := authn.NewClaimMapper(appCfg, verifier, logger, mapperOpts...)
 	if err != nil {
 		return err
 	}

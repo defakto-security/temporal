@@ -6,13 +6,16 @@
 // verified against bundles the local SPIFFE agent streams over the Workload
 // API, so the check reads an in-memory copy and makes no call per request.
 // Every trust domain the agent holds a bundle for is accepted; the Cedar policy
-// decides what each may do. X.509 is transport (mTLS), not authorization.
+// decides what each may do. With clientCertAuth, a caller that sends no header
+// may instead present a verified X.509-SVID client certificate (Temporal's own
+// services do this); its URI SAN is the ID.
 // role_class is a structural template test on the SPIFFE ID, forge-resistant
 // because issuance policy — not the holder — controls the path.
 package authn
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,12 +23,15 @@ import (
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/bundle/jwtbundle"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
+	"google.golang.org/grpc/credentials"
 
 	spiffeconfig "github.com/defakto-security/temporal/config"
 )
@@ -52,7 +58,7 @@ const AuthType = "spiffe"
 // well under 4 KiB.
 const maxTokenBytes = 8 << 10
 
-// warnEvery is the shortest gap between "rejecting JWT-SVID" warnings. An
+// warnEvery is the shortest gap between "rejecting caller identity" warnings. An
 // unauthenticated caller can send bad tokens as fast as it likes, so the log is
 // sampled; the count of skipped warnings is attached to the next one.
 const warnEvery = time.Second
@@ -133,6 +139,11 @@ type ClaimMapper struct {
 	human   spiffeconfig.IDMatcher
 	service spiffeconfig.IDMatcher
 	logger  log.Logger
+	// clientCert turns on identity from a verified mTLS client certificate.
+	clientCert bool
+	// x509Bundles holds the X.509 roots per trust domain. A cert is accepted
+	// only if it verifies against the roots of the trust domain in its own SAN.
+	x509Bundles x509bundle.Source
 
 	lastWarn   atomic.Int64 // unix nanos of the last warning
 	suppressed atomic.Int64 // warnings skipped since then
@@ -141,7 +152,7 @@ type ClaimMapper struct {
 var _ authorization.ClaimMapper = (*ClaimMapper)(nil)
 
 // NewClaimMapper builds a ClaimMapper from the config contract.
-func NewClaimMapper(cfg *spiffeconfig.Config, v Verifier, logger log.Logger) (*ClaimMapper, error) {
+func NewClaimMapper(cfg *spiffeconfig.Config, v Verifier, logger log.Logger, opts ...Option) (*ClaimMapper, error) {
 	if v == nil {
 		return nil, errors.New("claim mapper: a verifier is required")
 	}
@@ -153,7 +164,37 @@ func NewClaimMapper(cfg *spiffeconfig.Config, v Verifier, logger log.Logger) (*C
 	if err != nil {
 		return nil, err
 	}
-	return &ClaimMapper{verify: v, human: human, service: service, logger: logger}, nil
+	m := &ClaimMapper{verify: v, human: human, service: service, logger: logger, clientCert: cfg.ClientCertAuth}
+	for _, o := range opts {
+		o(m)
+	}
+	if m.clientCert && m.x509Bundles == nil {
+		return nil, errors.New("claim mapper: clientCertAuth needs X.509 bundles (WithX509Bundles)")
+	}
+	return m, nil
+}
+
+// Option tunes a ClaimMapper.
+type Option func(*ClaimMapper)
+
+// WithX509Bundles sets the X.509 bundle source that client certificates are
+// checked against. Required when clientCertAuth is on.
+func WithX509Bundles(b x509bundle.Source) Option { return func(m *ClaimMapper) { m.x509Bundles = b } }
+
+// WorkloadAPIX509Bundles opens the Workload API bundle source described by cfg
+// and waits (up to timeout) for the first bundles. Close it on shutdown.
+func WorkloadAPIX509Bundles(ctx context.Context, cfg spiffeconfig.WorkloadAPIConfig, timeout time.Duration) (x509bundle.Source, func() error, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var opts []workloadapi.BundleSourceOption
+	if cfg.Address != "" {
+		opts = append(opts, workloadapi.WithClientOptions(workloadapi.WithAddr(cfg.Address)))
+	}
+	src, err := workloadapi.NewBundleSource(ctx, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("workload API: %w", err)
+	}
+	return src, src.Close, nil
 }
 
 // GetClaims maps the request's auth info to Temporal Claims.
@@ -170,13 +211,29 @@ func (m *ClaimMapper) GetClaims(authInfo *authorization.AuthInfo) (*authorizatio
 	if authInfo == nil {
 		return unknown, nil
 	}
-	token, ok := bearerToken(authInfo.AuthToken)
-	if !ok {
-		return unknown, nil
-	}
-	id, err := m.verify.Verify(token)
-	if err != nil {
-		m.warnRejected(err)
+	var id spiffeid.ID
+	if authInfo.AuthToken != "" {
+		// Any header, even blank, wins. A bad token is not rescued by a cert.
+		token, ok := bearerToken(authInfo.AuthToken)
+		if !ok {
+			return unknown, nil
+		}
+		var err error
+		id, err = m.verify.Verify(token)
+		if err != nil {
+			m.warnRejected(err)
+			return unknown, nil
+		}
+	} else if m.clientCert {
+		var err error
+		id, err = m.certID(authInfo.TLSConnection)
+		if err != nil {
+			if !errors.Is(err, errNoClientCert) {
+				m.warnRejected(err)
+			}
+			return unknown, nil
+		}
+	} else {
 		return unknown, nil
 	}
 	var class RoleClass
@@ -191,6 +248,32 @@ func (m *ClaimMapper) GetClaims(authInfo *authorization.AuthInfo) (*authorizatio
 		return unknown, nil
 	}
 	return &authorization.Claims{Subject: id.String(), AuthType: AuthType, Extensions: class}, nil
+}
+
+// errNoClientCert means the peer sent no usable certificate. It is the normal
+// case for a caller without mTLS, so it is not logged.
+var errNoClientCert = errors.New("no verified client certificate")
+
+// certID reads the SPIFFE ID from the peer's X.509-SVID. Two checks must pass.
+// Temporal's TLS layer must have verified a chain (requireClientAuth plus
+// clientCaFiles), which leaves VerifiedChains set. Then the cert must verify
+// again against the roots of the trust domain in its OWN URI SAN, from the
+// Workload API. A merged CA file cannot bind a SAN to its domain: without this
+// step any root in it could mint an ID in any trust domain. x509svid.Verify
+// also checks the leaf is not a CA, has exactly one URI SAN, a canonical ID and
+// is within its validity period. The digitalSignature usage is checked here.
+func (m *ClaimMapper) certID(ci *credentials.TLSInfo) (spiffeid.ID, error) {
+	if ci == nil || len(ci.State.VerifiedChains) == 0 || len(ci.State.VerifiedChains[0]) == 0 {
+		return spiffeid.ID{}, errNoClientCert
+	}
+	id, _, err := x509svid.Verify(ci.State.PeerCertificates, m.x509Bundles)
+	if err != nil {
+		return spiffeid.ID{}, fmt.Errorf("client certificate rejected: %w", err)
+	}
+	if ci.State.PeerCertificates[0].KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		return spiffeid.ID{}, errors.New("client certificate lacks the digitalSignature key usage")
+	}
+	return id, nil
 }
 
 // bearerToken extracts the token from an `authorization` header value. The
@@ -219,7 +302,7 @@ func (m *ClaimMapper) warnRejected(err error) {
 	if len(text) > maxLoggedErrorBytes {
 		text = text[:maxLoggedErrorBytes]
 	}
-	m.logger.Warn("rejecting JWT-SVID",
+	m.logger.Warn("rejecting caller identity",
 		tag.NewStringTag("reason", rejectReason(err)),
 		tag.NewStringTag("error", fmt.Sprintf("%q", text)),
 		tag.NewInt64("suppressed", m.suppressed.Swap(0)))
@@ -229,6 +312,8 @@ func (m *ClaimMapper) warnRejected(err error) {
 func rejectReason(err error) string {
 	e := err.Error()
 	switch {
+	case strings.Contains(e, "client certificate"):
+		return "bad_client_cert"
 	case strings.Contains(e, "neither devIDTemplate"):
 		return "unmatched_identity"
 	case strings.Contains(e, "expired"):

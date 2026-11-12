@@ -5,9 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,11 +22,13 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/spiffe/go-spiffe/v2/bundle/jwtbundle"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
+	"google.golang.org/grpc/credentials"
 
 	spiffeconfig "github.com/defakto-security/temporal/config"
 )
@@ -300,4 +307,135 @@ func TestDenyAllVerifier(t *testing.T) {
 	got, err := m.GetClaims(&authorization.AuthInfo{AuthToken: "a.b.c"})
 	require.NoError(t, err)
 	require.Equal(t, RoleClassUnknown, got.Extensions)
+}
+
+// pki is a throwaway CA per trust domain, with leaves signed by them.
+type pki struct {
+	cas     map[string]*x509.Certificate
+	keys    map[string]*ecdsa.PrivateKey
+	bundles *x509bundle.Set
+}
+
+func newPKI(t *testing.T, tds ...string) *pki {
+	t.Helper()
+	p := &pki{cas: map[string]*x509.Certificate{}, keys: map[string]*ecdsa.PrivateKey{}, bundles: x509bundle.NewSet()}
+	for i, td := range tds {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(int64(i + 1)), Subject: pkix.Name{CommonName: "ca " + td},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+		require.NoError(t, err)
+		ca, err := x509.ParseCertificate(der)
+		require.NoError(t, err)
+		p.cas[td], p.keys[td] = ca, key
+		p.bundles.Add(x509bundle.FromX509Authorities(spiffeid.RequireTrustDomainFromString(td), []*x509.Certificate{ca}))
+	}
+	return p
+}
+
+type leafOpt struct {
+	uris    []string
+	isCA    bool
+	expired bool
+	noSig   bool
+}
+
+// leaf issues a cert from signer's CA. verified sets VerifiedChains, which
+// stands in for Temporal's TLS layer having checked the chain.
+func (p *pki) leaf(t *testing.T, signer string, verified bool, o leafOpt) *credentials.TLSInfo {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(100), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, IsCA: o.isCA, BasicConstraintsValid: true,
+	}
+	if o.noSig {
+		tmpl.KeyUsage = x509.KeyUsageKeyEncipherment
+	}
+	if o.isCA {
+		tmpl.KeyUsage |= x509.KeyUsageCertSign
+	}
+	if o.expired {
+		tmpl.NotBefore, tmpl.NotAfter = time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour)
+	}
+	for _, u := range o.uris {
+		pu, err := url.Parse(u)
+		require.NoError(t, err)
+		tmpl.URIs = append(tmpl.URIs, pu)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.cas[signer], key.Public(), p.keys[signer])
+	require.NoError(t, err)
+	cert, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	st := tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	if verified {
+		st.VerifiedChains = [][]*x509.Certificate{{cert, p.cas[signer]}}
+	}
+	return &credentials.TLSInfo{State: st}
+}
+
+func TestGetClaims_ClientCert(t *testing.T) {
+	t.Parallel()
+	s := newSigner(t)
+	pk := newPKI(t, homeTD, foreignTD)
+	future := time.Now().Add(time.Hour)
+	const (
+		worker = "spiffe://" + homeTD + "/ns/temporal/sa/temporal-worker"
+		other  = "spiffe://" + foreignTD + "/ns/temporal/sa/temporal-worker"
+	)
+	jwtSvc := "spiffe://" + homeTD + "/ns/payments/sa/api"
+	pinned := "spiffe://" + homeTD + "/users/{domain}/{username}"
+	ok := leafOpt{uris: []string{worker}}
+
+	cases := []struct {
+		name    string
+		flag    bool
+		token   string
+		tls     *credentials.TLSInfo
+		want    RoleClass
+		subject string
+	}{
+		{"valid cert", true, "", pk.leaf(t, homeTD, true, ok), RoleClassService, worker},
+		{"federated domain keeps its own domain", true, "", pk.leaf(t, foreignTD, true, leafOpt{uris: []string{other}}), RoleClassService, other},
+		{"flag off ignores cert", false, "", pk.leaf(t, homeTD, true, ok), RoleClassUnknown, ""},
+		{"unverified chain", true, "", pk.leaf(t, homeTD, false, ok), RoleClassUnknown, ""},
+		{"no TLS info", true, "", nil, RoleClassUnknown, ""},
+		{"no URI SAN", true, "", pk.leaf(t, homeTD, true, leafOpt{}), RoleClassUnknown, ""},
+		{"two URI SANs", true, "", pk.leaf(t, homeTD, true, leafOpt{uris: []string{worker, other}}), RoleClassUnknown, ""},
+		{"not a SPIFFE ID", true, "", pk.leaf(t, homeTD, true, leafOpt{uris: []string{"https://example.org/x"}}), RoleClassUnknown, ""},
+		{"non-canonical SAN", true, "", pk.leaf(t, homeTD, true, leafOpt{uris: []string{worker + "/"}}), RoleClassUnknown, ""},
+		// The forgery the merged CA file allows: the foreign root signs a home ID.
+		{"foreign root cannot mint a home ID", true, "", pk.leaf(t, foreignTD, true, leafOpt{uris: []string{worker}}), RoleClassUnknown, ""},
+		{"CA cert is not an SVID", true, "", pk.leaf(t, homeTD, true, leafOpt{uris: []string{"spiffe://" + homeTD}, isCA: true}), RoleClassUnknown, ""},
+		{"no digitalSignature", true, "", pk.leaf(t, homeTD, true, leafOpt{uris: []string{worker}, noSig: true}), RoleClassUnknown, ""},
+		{"expired cert", true, "", pk.leaf(t, homeTD, true, leafOpt{uris: []string{worker}, expired: true}), RoleClassUnknown, ""},
+		{"JWT wins over cert", true, s.sign(t, s.key, claimsFor(jwtSvc, aud, future)), pk.leaf(t, homeTD, true, ok), RoleClassService, jwtSvc},
+		{"bad JWT is not rescued by cert", true, "not.a.jwt", pk.leaf(t, homeTD, true, ok), RoleClassUnknown, ""},
+		{"blank header is still a header", true, " \t", pk.leaf(t, homeTD, true, ok), RoleClassUnknown, ""},
+		{"JWT works with flag off", false, s.sign(t, s.key, claimsFor(jwtSvc, aud, future)), pk.leaf(t, homeTD, true, ok), RoleClassService, jwtSvc},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &spiffeconfig.Config{DevIDTemplate: pinned, ClientCertAuth: tc.flag}
+			m, err := NewClaimMapper(cfg, NewVerifier(s.bundles, aud), log.NewNoopLogger(), WithX509Bundles(pk.bundles))
+			require.NoError(t, err)
+			got, err := m.GetClaims(&authorization.AuthInfo{AuthToken: tc.token, TLSConnection: tc.tls})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got.Extensions)
+			require.Equal(t, tc.subject, got.Subject)
+			require.Zero(t, got.System)
+		})
+	}
+}
+
+func TestNewClaimMapper_ClientCertNeedsBundles(t *testing.T) {
+	t.Parallel()
+	_, err := NewClaimMapper(&spiffeconfig.Config{ClientCertAuth: true}, NewVerifier(newSigner(t).bundles, aud), log.NewNoopLogger())
+	require.ErrorContains(t, err, "X.509 bundles")
 }
