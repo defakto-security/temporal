@@ -145,8 +145,9 @@ func TestFirstTokenFailureFailsFast(t *testing.T) {
 	require.ErrorContains(t, err, "first token")
 }
 
-func TestOptionsValidation(t *testing.T) {
-	t.Parallel()
+// Not parallel: it swaps the package-level minRefreshInterval, which the
+// parallel tests read. Serial tests finish before parallel ones resume.
+func TestOptionsValidation(t *testing.T) { //nolint:paralleltest // swaps a package global
 	_, err := NewTokenSource(t.Context(), Options{RefreshInterval: 20 * time.Minute})
 	require.Error(t, err)
 	// Below the floor is rejected too, when the test override is off.
