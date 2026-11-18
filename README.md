@@ -37,6 +37,19 @@ decision = f(role_class, namespace, verb_class)
   is refused.
 - `identityMode: observe` lets callers without a valid identity through (the
   forbidden-all, break-glass, namespace-admin and cluster-admin verbs stay denied). It is a rollout aid.
+- **Upgrade note: admin verb classes.** `namespace-admin` and `cluster-admin`
+  are new. Every AdminService and OperatorService method now maps to
+  `cluster-admin`, and `RegisterNamespace`, `UpdateNamespace` and
+  `DeprecateNamespace` map to `namespace-admin`. That includes
+  `DeleteNamespace`, `RemoveRemoteCluster`, `RemoveTask` and
+  `DescribeMutableState`. These methods were unclassified and denied before.
+  A permit that does not name an `action` (or uses an `action` wildcard) now
+  grants them, and the `forbidden-all` floor does not block them. Before you
+  upgrade, add `action in [...]` lists to such permits, or add
+  `forbid (principal, action in [Action::"namespace-admin", Action::"cluster-admin"], resource);`
+  and permit only the admin tooling workload by exact ID. The shipped policy
+  grants neither class. `DeleteWorkflowExecution` on both services stays
+  `forbidden-all`.
 - Temporal's own services (worker, scheduler) carry no JWT-SVID. Set
   `clientCertAuth: true` to identify them by their X.509-SVID client cert
   (URI SAN = SPIFFE ID). Any `authorization` header, even blank, wins and is

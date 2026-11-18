@@ -90,42 +90,26 @@ var exactVerbClass = map[string]VerbClass{
 	"RegisterNamespace":  VerbNamespaceAdmin,
 	"UpdateNamespace":    VerbNamespaceAdmin,
 	"DeprecateNamespace": VerbNamespaceAdmin,
-	// NOTE: RemoveTask and DescribeHistoryHost are AdminService methods and are
-	// classified in adminVerbClass, NOT here. isAdminService resolves them by
-	// service before this table is consulted, so an entry here would be dead.
+	// NOTE: AdminService and OperatorService methods are resolved by service
+	// before this table is consulted (see adminVerbClass), so an entry here for
+	// one of them would be dead.
 }
 
-// adminVerbClass lists the AdminService and OperatorService methods explicitly
-// classified. Keyed on the bare method name; a name shared by both services
-// (ListClusters, AddSearchAttributes) must map to the SAME class in both.
-// Anything on these services not listed here is also VerbClusterAdmin, so a new
-// upstream operator RPC needs the same permit as the rest, not a code change.
+// adminVerbClass holds the deliberate exceptions on AdminService and
+// OperatorService. Keyed on the bare method name, so a name shared by both
+// services must mean the same thing in both. Every method NOT listed here is
+// VerbClusterAdmin, so a new upstream operator or admin RPC needs no entry and
+// gets the same permit as the rest.
 //
-// NOTE: this table is maintained by hand against a pinned Temporal api version
-// (see go.mod). renovate.json auto-bumps that dependency, so a new operator RPC
-// can appear unclassified — TestOperatorAndAdminSurfaceClassified below fails
-// the build until it is triaged. Operator/admin methods are cluster-admin: the
-// shipped policy grants that class to no one, and admin tooling gets a permit.
+// DeleteWorkflowExecution is here because cluster-admin must never reach
+// destruction: it stays VerbForbiddenAll, like the WorkflowService RPC of the
+// same name, and the reference policy's forbid floor denies it to everyone.
+//
+// NOTE: renovate.json auto-bumps the pinned Temporal api version.
+// TestOperatorAndAdminSurfaceClassified walks the generated descriptors and
+// checks every method against this table plus the cluster-admin fallback.
 var adminVerbClass = map[string]VerbClass{
-	// AdminService (replication / shard internals).
-	"DescribeMutableState":           VerbClusterAdmin,
-	"GetWorkflowExecutionRawHistory": VerbClusterAdmin,
-	"RemoveTask":                     VerbClusterAdmin,
-	"DescribeHistoryHost":            VerbClusterAdmin,
-
-	// OperatorService (cluster + namespace + search-attribute administration).
-	"AddOrUpdateRemoteCluster": VerbClusterAdmin,
-	"RemoveRemoteCluster":      VerbClusterAdmin,
-	"ListClusters":             VerbClusterAdmin, // also AdminService
-	"DeleteNamespace":          VerbClusterAdmin,
-	"AddSearchAttributes":      VerbClusterAdmin, // also AdminService
-	"RemoveSearchAttributes":   VerbClusterAdmin,
-	"ListSearchAttributes":     VerbClusterAdmin,
-	"CreateNexusEndpoint":      VerbClusterAdmin,
-	"UpdateNexusEndpoint":      VerbClusterAdmin,
-	"DeleteNexusEndpoint":      VerbClusterAdmin,
-	"GetNexusEndpoint":         VerbClusterAdmin,
-	"ListNexusEndpoints":       VerbClusterAdmin,
+	"DeleteWorkflowExecution": VerbForbiddenAll,
 }
 
 // VerbClassOf classifies a full APIName. It is the product-owned default; a

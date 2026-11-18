@@ -328,6 +328,42 @@ func TestIdentityMode_ObserveNeverForgivesDangerousOrUnknownVerbs(t *testing.T) 
 	}
 }
 
+// Observe mode never forgives namespace-admin or cluster-admin: a caller with no
+// identity is denied, while a valid caller with an explicit permit is allowed.
+func TestIdentityMode_ObserveAdminClasses(t *testing.T) {
+	t.Parallel()
+	policy := loadReferencePolicy(t) + `
+permit (
+  principal in RoleClass::"service",
+  action in [Action::"namespace-admin", Action::"cluster-admin"],
+  resource
+) when { principal.trust_domain == "corp.defakto.security" };
+`
+	a, _, _ := newAuthorizerWith(t, policy, "", spiffeconfig.DecisionLogOff, spiffeconfig.IdentityModeObserve)
+	valid := claimsFor(svcID, authn.RoleClassService)
+	for _, api := range []string{
+		svc + "RegisterNamespace",
+		"/temporal.api.operatorservice.v1.OperatorService/DeleteNamespace",
+		adminSvc + "DescribeMutableState",
+	} {
+		res, err := a.Authorize(context.Background(), nil, &authorization.CallTarget{APIName: api, Namespace: "payments"})
+		require.NoError(t, err)
+		require.Equal(t, authorization.DecisionDeny, res.Decision, "nil claims: %s", api)
+
+		res, err = a.Authorize(context.Background(), valid, &authorization.CallTarget{APIName: api, Namespace: "payments"})
+		require.NoError(t, err)
+		require.Equal(t, authorization.DecisionAllow, res.Decision, "permitted: %s", api)
+	}
+	// Destruction stays denied even with that permit.
+	res, err := a.Authorize(context.Background(), valid, &authorization.CallTarget{APIName: adminSvc + "DeleteWorkflowExecution", Namespace: "payments"})
+	require.NoError(t, err)
+	require.Equal(t, authorization.DecisionDeny, res.Decision)
+	// Control: an ordinary read with nil claims is forgiven.
+	res, err = a.Authorize(context.Background(), nil, &authorization.CallTarget{APIName: svc + "DescribeNamespace", Namespace: "payments"})
+	require.NoError(t, err)
+	require.Equal(t, authorization.DecisionAllow, res.Decision)
+}
+
 func TestAuthorize_NilTargetFailsClosed(t *testing.T) {
 	t.Parallel()
 	a, _, _ := newAuthorizerWith(t, loadReferencePolicy(t), "", spiffeconfig.DecisionLogOff, "")
