@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	operatorservice "go.temporal.io/api/operatorservice/v1"
 	adminservice "go.temporal.io/server/api/adminservice/v1"
 	"google.golang.org/grpc"
@@ -51,32 +52,38 @@ func TestVerbClassOf(t *testing.T) {
 		{svc + "ResetWorkflowExecution", VerbBreakGlass},
 
 		{svc + "DeleteWorkflowExecution", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/RemoveTask", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/DescribeHistoryHost", VerbForbiddenAll},
+		{"/temporal.server.api.adminservice.v1.AdminService/DeleteWorkflowExecution", VerbForbiddenAll},
+		{"/temporal.server.api.adminservice.v1.AdminService/RemoveTask", VerbClusterAdmin},
+		{"/temporal.server.api.adminservice.v1.AdminService/DescribeHistoryHost", VerbClusterAdmin},
 
 		// AdminService RPCs are forbidden by service, NOT classified by the
 		// bare-name prefix rules. DescribeMutableState shares a name shape with
 		// WorkflowService reads but must never be treated as read-only.
-		{"/temporal.server.api.adminservice.v1.AdminService/DescribeMutableState", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/GetWorkflowExecutionRawHistory", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/ListClusters", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/AddSearchAttributes", VerbForbiddenAll},
+		{"/temporal.server.api.adminservice.v1.AdminService/DescribeMutableState", VerbClusterAdmin},
+		{"/temporal.server.api.adminservice.v1.AdminService/GetWorkflowExecutionRawHistory", VerbClusterAdmin},
+		{"/temporal.server.api.adminservice.v1.AdminService/ListClusters", VerbClusterAdmin},
+		{"/temporal.server.api.adminservice.v1.AdminService/AddSearchAttributes", VerbClusterAdmin},
 
 		// Service is resolved BEFORE the exact-name table: an admin method that
 		// shares a name with a WorkflowService entry (GetSearchAttributes) must
 		// NOT inherit the benign read-only class.
-		{"/temporal.server.api.adminservice.v1.AdminService/GetSearchAttributes", VerbUnknown},
+		{"/temporal.server.api.adminservice.v1.AdminService/GetSearchAttributes", VerbClusterAdmin},
 
 		// OperatorService is an operator surface too. Its List*/Describe* names
 		// would otherwise hit the WorkflowService prefix rules and become
 		// read-only (reachable by humans); classify by service instead.
-		{opsvc + "ListClusters", VerbForbiddenAll},
-		{opsvc + "ListSearchAttributes", VerbForbiddenAll},
-		{opsvc + "DeleteNamespace", VerbForbiddenAll},
-		{opsvc + "AddSearchAttributes", VerbForbiddenAll},
-		{opsvc + "RemoveSearchAttributes", VerbForbiddenAll},
-		// An unlisted operator method is denied (fail closed), not read-only.
-		{opsvc + "SomeFutureOperatorRPC", VerbUnknown},
+		{opsvc + "ListClusters", VerbClusterAdmin},
+		{opsvc + "ListSearchAttributes", VerbClusterAdmin},
+		{opsvc + "DeleteNamespace", VerbClusterAdmin},
+		{opsvc + "AddSearchAttributes", VerbClusterAdmin},
+		{opsvc + "RemoveSearchAttributes", VerbClusterAdmin},
+		// An unlisted operator method is cluster-admin, not read-only.
+		{opsvc + "SomeFutureOperatorRPC", VerbClusterAdmin},
+
+		// Namespace lifecycle is namespace-admin.
+		{svc + "RegisterNamespace", VerbNamespaceAdmin},
+		{svc + "UpdateNamespace", VerbNamespaceAdmin},
+		{svc + "DeprecateNamespace", VerbNamespaceAdmin},
 
 		// A GetXxx without History is not read-only by the prefix rule.
 		{svc + "GetClusterInfo", VerbUnknown},
@@ -92,29 +99,17 @@ func TestVerbClassOf(t *testing.T) {
 }
 
 // TestOperatorAndAdminSurfaceClassified walks the generated gRPC service
-// descriptors for the pinned Temporal api/server versions and fails if any
-// OperatorService or AdminService method (unary OR streaming) is not resolved
-// as an operator surface. renovate.json auto-bumps these dependencies; this
-// test is the tripwire that a newly-added operator/admin RPC is not silently
-// left to the bare-name prefix rules (which would make a List*/Describe* RPC
-// human-readable). "Resolved as operator surface" means either an explicit
-// adminVerbClass classification or VerbUnknown (denied) — never a
-// WorkflowService class reached by prefix matching.
+// descriptors for the pinned Temporal api/server versions and checks every
+// OperatorService and AdminService method (unary and streaming): its class is
+// the adminVerbClass entry when there is one, else VerbClusterAdmin. This is the
+// tripwire against a newly added operator or admin RPC reaching a WorkflowService
+// prefix rule (which would make a List* or Describe* RPC human-readable).
 func TestOperatorAndAdminSurfaceClassified(t *testing.T) {
 	t.Parallel()
 
 	descs := []grpc.ServiceDesc{
 		operatorservice.OperatorService_ServiceDesc,
 		adminservice.AdminService_ServiceDesc,
-	}
-
-	// Classes a WorkflowService prefix rule can produce. An operator/admin
-	// method landing in one of these means the service check was bypassed.
-	workflowPrefixClasses := map[VerbClass]bool{
-		VerbReadOnly:    true,
-		VerbStartSignal: true,
-		VerbWorker:      true,
-		VerbBreakGlass:  true,
 	}
 
 	for _, d := range descs {
@@ -127,12 +122,11 @@ func TestOperatorAndAdminSurfaceClassified(t *testing.T) {
 			names = append(names, s.StreamName)
 		}
 		for _, name := range names {
-			full := "/" + svc + "/" + name
-			got := VerbClassOf(full)
-			if workflowPrefixClasses[got] {
-				t.Errorf("%s classified as %q via prefix rules; operator/admin "+
-					"methods must be explicitly classified or VerbUnknown", full, got)
+			want := VerbClusterAdmin
+			if c, ok := adminVerbClass[name]; ok {
+				want = c
 			}
+			require.Equal(t, want, VerbClassOf("/"+svc+"/"+name), "%s/%s", svc, name)
 		}
 	}
 }

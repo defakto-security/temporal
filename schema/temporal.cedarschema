@@ -16,7 +16,8 @@ entity Workload in [RoleClass] {
 entity VerbClass;
 entity Namespace;
 
-action "read-only", "start-signal", "worker", "break-glass", "forbidden-all"
+action "read-only", "start-signal", "worker", "break-glass", "namespace-admin", "cluster-admin",
+       "forbidden-all"
   appliesTo {
     principal: [Workload],
     resource: [Namespace],

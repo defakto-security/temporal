@@ -108,7 +108,7 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 	}
 	if a.observeIdentity {
 		logger.Warn("identityMode=observe: calls without a valid identity are ALLOWED and only reported; " +
-			"forbidden-all, break-glass and unclassified APIs stay denied")
+			"forbidden-all, break-glass, namespace-admin, cluster-admin and unclassified APIs stay denied")
 	}
 	if cfg.ShadowPolicyPath != "" {
 		sh, err := newPolicySource(cfg.ShadowPolicyPath, logger)
@@ -165,7 +165,7 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 	// let through and reported, so callers without a valid identity can be
 	// found before enforcement is turned on.
 	// Even then, the verbs the reference policy forbids for everyone
-	// (forbidden-all, break-glass) stay denied, so a caller never gains those
+	// (forbidden-all, break-glass, namespace-admin, cluster-admin) stay denied, so a caller never gains those
 	// by dropping its credential.
 	if a.observeIdentity && d.identityFailure && !alwaysDenied(VerbClassOf(target.APIName)) {
 		d.forgiven = true
@@ -180,7 +180,8 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 
 // alwaysDenied reports verb classes that observe mode never forgives.
 func alwaysDenied(v VerbClass) bool {
-	return v == VerbForbiddenAll || v == VerbBreakGlass || v == VerbUnknown
+	return v == VerbForbiddenAll || v == VerbBreakGlass || v == VerbUnknown ||
+		v == VerbNamespaceAdmin || v == VerbClusterAdmin
 }
 
 // deny builds a denial Result carrying reason.

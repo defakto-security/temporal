@@ -73,7 +73,7 @@ data:
     # as `would_deny`, and counts it as decision="allow" with a reason (unauthenticated,
     # unknown_role_class, malformed_subject). Run it until none appear, then
     # switch to enforce. Policy decisions are always enforced, and forbidden-all,
-    # break-glass and unclassified APIs stay denied. Observe is no stricter than
+    # break-glass, namespace-admin, cluster-admin and unclassified APIs stay denied. Observe is no stricter than
     # having no authorizer: turn it off once callers are identified.
     # identityMode: observe
     # A candidate policy. Every call is also checked against it; the live
