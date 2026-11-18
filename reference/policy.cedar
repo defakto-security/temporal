@@ -20,7 +20,7 @@
 //               principal with `== RoleClass::"x"` is rejected at load.
 //               Write denies as allow-lists: `forbid ... when { principal.ns ==
 //               "prod" }` does not fire when ns is "" (an ID of another shape).
-//   Action    = Action::"read-only" | "start-signal" | "worker" | "break-glass" | "forbidden-all"
+//   Action    = Action::"read-only" | "start-signal" | "worker" | "break-glass" | "namespace-admin" | "cluster-admin" | "forbidden-all"
 //   Resource  = Namespace::"<name>"
 
 // --- service ---------------------------------------------------------------
@@ -77,6 +77,16 @@ permit (
 // permit (
 //   principal in RoleClass::"human",
 //   action == Action::"break-glass",
+//   resource
+// );
+
+// namespace-admin (Register / Update / Deprecate namespace) and cluster-admin
+// (every AdminService and OperatorService method) are granted to no one by
+// default. Give them to the admin tooling workload only, by exact ID.
+//
+// permit (
+//   principal == Workload::"spiffe://corp.defakto.security/ns/temporal/sa/temporal-admintools",
+//   action in [Action::"namespace-admin", Action::"cluster-admin"],
 //   resource
 // );
 

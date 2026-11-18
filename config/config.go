@@ -114,7 +114,7 @@ type Config struct {
 	// decision="allow" with the
 	// reason, so you can find callers without a valid identity before turning
 	// enforcement on. Policy decisions are unaffected: a missing or broken live
-	// policy still denies, and calls to forbidden-all, break-glass or
+	// policy still denies, and calls to forbidden-all, break-glass, namespace-admin, cluster-admin or
 	// unclassified APIs stay denied. Observe is no stricter than running with
 	// no authorizer at all; do not leave it on once callers are identified.
 	IdentityMode string `yaml:"identityMode"`

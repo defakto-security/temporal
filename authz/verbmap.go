@@ -21,7 +21,14 @@ const (
 	VerbWorker VerbClass = "worker"
 	// VerbBreakGlass is Terminate/RequestCancel/Reset — on-call-on-demand only.
 	VerbBreakGlass VerbClass = "break-glass"
-	// VerbForbiddenAll is Delete/RemoveTask/shard-admin — no legitimate caller;
+	// VerbNamespaceAdmin is RegisterNamespace/UpdateNamespace/DeprecateNamespace.
+	// The shipped policy grants it to no one; admin tooling gets a permit.
+	VerbNamespaceAdmin VerbClass = "namespace-admin"
+	// VerbClusterAdmin is every AdminService and OperatorService method, listed
+	// or not (cluster, shard, search-attribute and namespace-delete operations).
+	// The shipped policy grants it to no one; admin tooling gets a permit.
+	VerbClusterAdmin VerbClass = "cluster-admin"
+	// VerbForbiddenAll is DeleteWorkflowExecution — no legitimate caller;
 	// forbidden by default in the shipped reference policy.
 	VerbForbiddenAll VerbClass = "forbidden-all"
 	// VerbUnknown is any API the map does not recognize. The authorizer treats
@@ -79,6 +86,10 @@ var exactVerbClass = map[string]VerbClass{
 	"ResetWorkflowExecution":         VerbBreakGlass,
 
 	"DeleteWorkflowExecution": VerbForbiddenAll,
+
+	"RegisterNamespace":  VerbNamespaceAdmin,
+	"UpdateNamespace":    VerbNamespaceAdmin,
+	"DeprecateNamespace": VerbNamespaceAdmin,
 	// NOTE: RemoveTask and DescribeHistoryHost are AdminService methods and are
 	// classified in adminVerbClass, NOT here. isAdminService resolves them by
 	// service before this table is consulted, so an entry here would be dead.
@@ -87,33 +98,34 @@ var exactVerbClass = map[string]VerbClass{
 // adminVerbClass lists the AdminService and OperatorService methods explicitly
 // classified. Keyed on the bare method name; a name shared by both services
 // (ListClusters, AddSearchAttributes) must map to the SAME class in both.
-// Anything on these services not listed here is VerbUnknown (denied).
+// Anything on these services not listed here is also VerbClusterAdmin, so a new
+// upstream operator RPC needs the same permit as the rest, not a code change.
 //
 // NOTE: this table is maintained by hand against a pinned Temporal api version
 // (see go.mod). renovate.json auto-bumps that dependency, so a new operator RPC
 // can appear unclassified — TestOperatorAndAdminSurfaceClassified below fails
-// the build until it is triaged. Operator/admin methods are forbidden-all by
-// default here because none has a legitimate caller through this frontend path.
+// the build until it is triaged. Operator/admin methods are cluster-admin: the
+// shipped policy grants that class to no one, and admin tooling gets a permit.
 var adminVerbClass = map[string]VerbClass{
 	// AdminService (replication / shard internals).
-	"DescribeMutableState":           VerbForbiddenAll,
-	"GetWorkflowExecutionRawHistory": VerbForbiddenAll,
-	"RemoveTask":                     VerbForbiddenAll,
-	"DescribeHistoryHost":            VerbForbiddenAll,
+	"DescribeMutableState":           VerbClusterAdmin,
+	"GetWorkflowExecutionRawHistory": VerbClusterAdmin,
+	"RemoveTask":                     VerbClusterAdmin,
+	"DescribeHistoryHost":            VerbClusterAdmin,
 
 	// OperatorService (cluster + namespace + search-attribute administration).
-	"AddOrUpdateRemoteCluster": VerbForbiddenAll,
-	"RemoveRemoteCluster":      VerbForbiddenAll,
-	"ListClusters":             VerbForbiddenAll, // also AdminService
-	"DeleteNamespace":          VerbForbiddenAll,
-	"AddSearchAttributes":      VerbForbiddenAll, // also AdminService
-	"RemoveSearchAttributes":   VerbForbiddenAll,
-	"ListSearchAttributes":     VerbForbiddenAll,
-	"CreateNexusEndpoint":      VerbForbiddenAll,
-	"UpdateNexusEndpoint":      VerbForbiddenAll,
-	"DeleteNexusEndpoint":      VerbForbiddenAll,
-	"GetNexusEndpoint":         VerbForbiddenAll,
-	"ListNexusEndpoints":       VerbForbiddenAll,
+	"AddOrUpdateRemoteCluster": VerbClusterAdmin,
+	"RemoveRemoteCluster":      VerbClusterAdmin,
+	"ListClusters":             VerbClusterAdmin, // also AdminService
+	"DeleteNamespace":          VerbClusterAdmin,
+	"AddSearchAttributes":      VerbClusterAdmin, // also AdminService
+	"RemoveSearchAttributes":   VerbClusterAdmin,
+	"ListSearchAttributes":     VerbClusterAdmin,
+	"CreateNexusEndpoint":      VerbClusterAdmin,
+	"UpdateNexusEndpoint":      VerbClusterAdmin,
+	"DeleteNexusEndpoint":      VerbClusterAdmin,
+	"GetNexusEndpoint":         VerbClusterAdmin,
+	"ListNexusEndpoints":       VerbClusterAdmin,
 }
 
 // VerbClassOf classifies a full APIName. It is the product-owned default; a
@@ -132,7 +144,7 @@ func VerbClassOf(apiName string) VerbClass {
 		if c, ok := adminVerbClass[name]; ok {
 			return c
 		}
-		return VerbUnknown
+		return VerbClusterAdmin
 	}
 	if c, ok := exactVerbClass[name]; ok {
 		return c

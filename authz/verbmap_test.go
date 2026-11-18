@@ -51,32 +51,37 @@ func TestVerbClassOf(t *testing.T) {
 		{svc + "ResetWorkflowExecution", VerbBreakGlass},
 
 		{svc + "DeleteWorkflowExecution", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/RemoveTask", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/DescribeHistoryHost", VerbForbiddenAll},
+		{"/temporal.server.api.adminservice.v1.AdminService/RemoveTask", VerbClusterAdmin},
+		{"/temporal.server.api.adminservice.v1.AdminService/DescribeHistoryHost", VerbClusterAdmin},
 
 		// AdminService RPCs are forbidden by service, NOT classified by the
 		// bare-name prefix rules. DescribeMutableState shares a name shape with
 		// WorkflowService reads but must never be treated as read-only.
-		{"/temporal.server.api.adminservice.v1.AdminService/DescribeMutableState", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/GetWorkflowExecutionRawHistory", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/ListClusters", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/AddSearchAttributes", VerbForbiddenAll},
+		{"/temporal.server.api.adminservice.v1.AdminService/DescribeMutableState", VerbClusterAdmin},
+		{"/temporal.server.api.adminservice.v1.AdminService/GetWorkflowExecutionRawHistory", VerbClusterAdmin},
+		{"/temporal.server.api.adminservice.v1.AdminService/ListClusters", VerbClusterAdmin},
+		{"/temporal.server.api.adminservice.v1.AdminService/AddSearchAttributes", VerbClusterAdmin},
 
 		// Service is resolved BEFORE the exact-name table: an admin method that
 		// shares a name with a WorkflowService entry (GetSearchAttributes) must
 		// NOT inherit the benign read-only class.
-		{"/temporal.server.api.adminservice.v1.AdminService/GetSearchAttributes", VerbUnknown},
+		{"/temporal.server.api.adminservice.v1.AdminService/GetSearchAttributes", VerbClusterAdmin},
 
 		// OperatorService is an operator surface too. Its List*/Describe* names
 		// would otherwise hit the WorkflowService prefix rules and become
 		// read-only (reachable by humans); classify by service instead.
-		{opsvc + "ListClusters", VerbForbiddenAll},
-		{opsvc + "ListSearchAttributes", VerbForbiddenAll},
-		{opsvc + "DeleteNamespace", VerbForbiddenAll},
-		{opsvc + "AddSearchAttributes", VerbForbiddenAll},
-		{opsvc + "RemoveSearchAttributes", VerbForbiddenAll},
-		// An unlisted operator method is denied (fail closed), not read-only.
-		{opsvc + "SomeFutureOperatorRPC", VerbUnknown},
+		{opsvc + "ListClusters", VerbClusterAdmin},
+		{opsvc + "ListSearchAttributes", VerbClusterAdmin},
+		{opsvc + "DeleteNamespace", VerbClusterAdmin},
+		{opsvc + "AddSearchAttributes", VerbClusterAdmin},
+		{opsvc + "RemoveSearchAttributes", VerbClusterAdmin},
+		// An unlisted operator method is cluster-admin, not read-only.
+		{opsvc + "SomeFutureOperatorRPC", VerbClusterAdmin},
+
+		// Namespace lifecycle is namespace-admin.
+		{svc + "RegisterNamespace", VerbNamespaceAdmin},
+		{svc + "UpdateNamespace", VerbNamespaceAdmin},
+		{svc + "DeprecateNamespace", VerbNamespaceAdmin},
 
 		// A GetXxx without History is not read-only by the prefix rule.
 		{svc + "GetClusterInfo", VerbUnknown},
