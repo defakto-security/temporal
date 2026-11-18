@@ -364,6 +364,30 @@ permit (
 	require.Equal(t, authorization.DecisionAllow, res.Decision)
 }
 
+// The README's forbid-with-exception recipe: others are denied, the exact
+// admin workload is allowed.
+func TestAdminForbidWithException(t *testing.T) {
+	t.Parallel()
+	const admin = "spiffe://corp.defakto.security/ns/temporal/sa/temporal-admintools"
+	policy := loadReferencePolicy(t) + `
+permit (
+  principal in RoleClass::"service",
+  action,
+  resource
+) when { principal.trust_domain == "corp.defakto.security" };
+forbid (principal, action in [Action::"namespace-admin", Action::"cluster-admin"], resource)
+  unless { principal == Workload::"` + admin + `" };
+`
+	a, _, _ := newAuthorizerWith(t, policy, "", spiffeconfig.DecisionLogOff, "")
+	api := &authorization.CallTarget{APIName: svc + "RegisterNamespace", Namespace: "payments"}
+	res, err := a.Authorize(context.Background(), claimsFor(svcID, authn.RoleClassService), api)
+	require.NoError(t, err)
+	require.Equal(t, authorization.DecisionDeny, res.Decision)
+	res, err = a.Authorize(context.Background(), claimsFor(admin, authn.RoleClassService), api)
+	require.NoError(t, err)
+	require.Equal(t, authorization.DecisionAllow, res.Decision)
+}
+
 func TestAuthorize_NilTargetFailsClosed(t *testing.T) {
 	t.Parallel()
 	a, _, _ := newAuthorizerWith(t, loadReferencePolicy(t), "", spiffeconfig.DecisionLogOff, "")

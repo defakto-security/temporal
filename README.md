@@ -45,10 +45,12 @@ decision = f(role_class, namespace, verb_class)
   `DescribeMutableState`. These methods were unclassified and denied before.
   A permit that does not name an `action` (or uses an `action` wildcard) now
   grants them, and the `forbidden-all` floor does not block them. Before you
-  upgrade, add `action in [...]` lists to such permits, or add
-  `forbid (principal, action in [Action::"namespace-admin", Action::"cluster-admin"], resource);`
-  and permit only the admin tooling workload by exact ID. The shipped policy
-  grants neither class. `DeleteWorkflowExecution` on both services stays
+  upgrade, add `action in [...]` lists to such permits (preferred). Or add
+  a forbid that excepts the admin tooling workload, because a forbid beats
+  every permit, including the admin one:
+  `forbid (principal, action in [Action::"namespace-admin", Action::"cluster-admin"], resource) unless { principal == Workload::"<admin tooling SPIFFE ID>" };`
+  then permit that workload by exact ID. The shipped policy grants neither
+  class. `DeleteWorkflowExecution` on both services stays
   `forbidden-all`.
 - Temporal's own services (worker, scheduler) carry no JWT-SVID. Set
   `clientCertAuth: true` to identify them by their X.509-SVID client cert
