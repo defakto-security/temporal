@@ -43,8 +43,14 @@ const (
 	GroupClusterAdmin   = "cluster-admin"
 )
 
-// workflowService is the service segment of the WorkflowService API names.
-const workflowService = "WorkflowService"
+// The full gRPC service names the group table is written for. LeafGroup matches
+// them exactly, so a service of another package or version with the same short
+// name gets no group.
+const (
+	workflowServiceFull = "temporal.api.workflowservice.v1.WorkflowService"
+	operatorServiceFull = "temporal.api.operatorservice.v1.OperatorService"
+	adminServiceFull    = "temporal.server.api.adminservice.v1.AdminService"
+)
 
 // leafMembers lists the WorkflowService methods in each leaf group. It is
 // explicit on purpose: a method not listed has no group, so only a permit that
@@ -208,6 +214,9 @@ func shippedGroupNames() []string {
 	for g := range shippedAggregates {
 		out = append(out, g)
 	}
+	if _, ok := leafMembers[GroupClusterAdmin]; !ok {
+		out = append(out, GroupClusterAdmin)
+	}
 	sort.Strings(out)
 	return out
 }
@@ -215,7 +224,8 @@ func shippedGroupNames() []string {
 func isShippedGroup(name string) bool {
 	_, leaf := leafMembers[name]
 	_, agg := shippedAggregates[name]
-	return leaf || agg
+	// cluster-admin has no member table: it is every Admin and Operator RPC.
+	return leaf || agg || name == GroupClusterAdmin
 }
 
 // ActionName turns a full gRPC API name into its Cedar action name.
@@ -232,31 +242,23 @@ func ActionName(apiName string) string {
 	return svc + "/" + method
 }
 
-// isAdminService reports whether a full APIName targets a low-level OPERATOR
-// surface: AdminService (replication/shard internals) or OperatorService
-// (namespace delete, cluster and search-attribute administration). Both carry
-// method names that collide with WorkflowService's, so the service is read off
-// the full path first.
-func isAdminService(apiName string) bool {
-	return strings.Contains(apiName, ".adminservice.") ||
-		strings.Contains(apiName, ".operatorservice.")
-}
-
 // LeafGroup returns the shipped leaf group of a full API name, or "" when the
 // image does not know the RPC. An RPC with no group can still be permitted by
-// naming it, or through a customer group.
+// naming it, or through a customer group. The full service name must match, so
+// another package's "WorkflowService" gets no group.
 func LeafGroup(apiName string) string {
-	svc, method, ok := strings.Cut(ActionName(apiName), "/")
+	svc, method, ok := strings.Cut(strings.TrimPrefix(apiName, "/"), "/")
 	if !ok {
 		return ""
 	}
-	if isAdminService(apiName) {
+	switch svc {
+	case operatorServiceFull, adminServiceFull:
+		// Every other method on these services is cluster-admin.
 		if g, ok := adminServiceLeaf[method]; ok {
 			return g
 		}
 		return GroupClusterAdmin
-	}
-	if svc == workflowService {
+	case workflowServiceFull:
 		return leafOf[method]
 	}
 	return ""
@@ -268,6 +270,13 @@ type actionGroups struct {
 	// parents maps a group, or a customer-grouped RPC action, to its direct
 	// parent groups. The shipped leaf of an RPC is added per request.
 	parents map[string][]string
+	// custom is the set of customer group names.
+	custom map[string]bool
+}
+
+// knownGroup reports whether name is a shipped group or a customer group.
+func (g *actionGroups) knownGroup(name string) bool {
+	return isShippedGroup(name) || g.custom[name]
 }
 
 // newActionGroups builds the hierarchy. A customer group may not reuse a shipped
@@ -275,12 +284,13 @@ type actionGroups struct {
 // group never changes what a shipped group holds, so a forbid on a shipped group
 // keeps covering the same RPCs.
 func newActionGroups(custom map[string][]string) (*actionGroups, error) {
-	g := &actionGroups{parents: make(map[string][]string)}
+	g := &actionGroups{parents: make(map[string][]string), custom: make(map[string]bool)}
 	for child, ps := range shippedGroupParents {
 		g.parents[child] = slices.Clone(ps)
 	}
 	var errs []error
 	for name := range custom {
+		g.custom[name] = true
 		if isShippedGroup(name) {
 			errs = append(errs, fmt.Errorf("actionGroups: %q is a shipped group and cannot be redefined", name))
 		}

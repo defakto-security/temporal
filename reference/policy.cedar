@@ -113,8 +113,10 @@ permit (
 // );
 
 // --- floor (customer-editable) ---------------------------------------------
-// Destruction: forbidden to everyone by default. delete-all holds every delete
-// group, so one rule covers them all.
+// Data and audit-trail deletion (workflow, schedule and activity deletes) is
+// forbidden to everyone by default. Cluster management deletes (deployments,
+// rules, namespaces) are in the admin groups, not here, so internal management
+// still works where an admin group is granted.
 // deny-overrides means this wins over any permit above.
 forbid (
   principal,

@@ -167,3 +167,30 @@ func TestObserveNeverForgivesUngroupedRPC(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, authorization.DecisionDeny, res.Decision)
 }
+
+// A misspelled group in a policy would match nothing. A forbid would silently
+// stop forbidding, so the policy is refused at load.
+func TestPolicyWithUnknownActionGroupRefused(t *testing.T) {
+	t.Parallel()
+	for name, pol := range map[string]string{
+		"forbid typo":     `forbid (principal, action in Action::"delte-all", resource);`,
+		"permit typo":     `permit (principal in RoleClass::"service", action == Action::"wrkflow-read", resource)` + scope + `;`,
+		"set member typo": `permit (principal in RoleClass::"service", action in [Action::"read-all", Action::"nope"], resource)` + scope + `;`,
+	} {
+		_, err := groupsAuthorizer(t, pol, nil)
+		require.ErrorContains(t, err, "unknown action group", name)
+	}
+	// A customer group, a shipped group and a single RPC all load.
+	pol := `permit (principal in RoleClass::"service", action in Action::"mine", resource)` + scope + `;
+permit (principal in RoleClass::"service", action == Action::"WorkflowService/NewRPC", resource)` + scope + `;
+forbid (principal, action in Action::"delete-all", resource);`
+	_, err := groupsAuthorizer(t, pol, map[string][]string{"mine": {"workflow-read"}})
+	require.NoError(t, err)
+}
+
+// cluster-admin is a shipped group, so a customer cannot redefine it.
+func TestCustomGroupCannotRedefineClusterAdmin(t *testing.T) {
+	t.Parallel()
+	_, err := groupsAuthorizer(t, loadReferencePolicy(t), map[string][]string{"cluster-admin": {"workflow-read"}})
+	require.Error(t, err)
+}

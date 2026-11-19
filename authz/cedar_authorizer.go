@@ -96,13 +96,12 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 	if err != nil {
 		return nil, err
 	}
-	ps, err := newPolicySource(cfg.PolicyPath, logger)
+	groups, err := newActionGroups(cfg.ActionGroups)
 	if err != nil {
 		return nil, err
 	}
-	groups, err := newActionGroups(cfg.ActionGroups)
+	ps, err := newPolicySource(cfg.PolicyPath, groups, logger)
 	if err != nil {
-		_ = ps.Close()
 		return nil, err
 	}
 	a := &CedarAuthorizer{
@@ -121,7 +120,7 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 			"admin, delete and unclassified APIs stay denied")
 	}
 	if cfg.ShadowPolicyPath != "" {
-		sh, err := newPolicySource(cfg.ShadowPolicyPath, logger)
+		sh, err := newPolicySource(cfg.ShadowPolicyPath, groups, logger)
 		if err != nil {
 			_ = ps.Close()
 			return nil, fmt.Errorf("shadow policy: %w", err)

@@ -158,7 +158,9 @@ func TestShippedGroupsConsistent(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestDeleteRPCsAreReviewed is the guard for delete-all. A WorkflowService RPC
+// TestDeleteRPCsAreReviewed is the guard for delete-all, which covers data and
+// audit trail deletion only. Cluster management deletes (deployments, rules) sit
+// in admin groups on purpose and are listed below. A WorkflowService RPC
 // whose name starts with Delete must be in a delete leaf, or be listed in
 // reviewedDeletes with the admin group it was put in on purpose. A new Delete*
 // RPC fails here until someone decides which it is.
@@ -182,4 +184,19 @@ func TestDeleteRPCsAreReviewed(t *testing.T) {
 		require.Contains(t, []string{GroupWorkflowDelete, GroupScheduleDelete, GroupActivityDelete}, got,
 			"%s is a new Delete RPC in %q; put it in a delete group, or list it in reviewedDeletes", m.MethodName, got)
 	}
+}
+
+// A service of another package with a known short name gets no group.
+func TestLeafGroupNeedsFullServiceName(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, GroupWorkflowStart, LeafGroup("/temporal.api.workflowservice.v1.WorkflowService/StartWorkflowExecution"))
+	for _, api := range []string{
+		"/other.WorkflowService/StartWorkflowExecution",
+		"/temporal.api.workflowservice.v2.WorkflowService/StartWorkflowExecution",
+		"/evil.adminservice.AdminService/DeleteNamespace",
+		"/x.operatorservice.Y/AddSearchAttributes",
+	} {
+		require.Empty(t, LeafGroup(api), api)
+	}
+	require.Equal(t, GroupClusterAdmin, LeafGroup("/temporal.api.operatorservice.v1.OperatorService/DeleteNamespace"))
 }

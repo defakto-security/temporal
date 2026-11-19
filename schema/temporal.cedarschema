@@ -1,7 +1,10 @@
-// Cedar schema for defakto-spiffe-temporal. Authored for CI validation and
-// documentation of the entity/action model. Per the project design, the
-// cedar-go validator is experimental, so runtime authorization does NOT depend
-// on this schema — it is a CI/documentation artifact.
+// Cedar schema for defakto-spiffe-temporal. DOCUMENTATION of the entity and
+// group model only. It is not a validation schema: the actions have no
+// appliesTo, and the roughly 150 RPC actions are built at request time, so a
+// Cedar validator cannot check a policy against it. Runtime authorization does
+// not read it. TestShippedGroupsConsistent keeps its group names and parents in
+// step with authz/verbmap.go. Policy checks happen at load (see
+// authz/policy_source.go).
 //
 // No namespace wrapper: the authorizer and reference policy use unqualified
 // identifiers (RoleClass, Namespace, Action::"..."), so the schema must too.

@@ -47,7 +47,7 @@ decision = f(identity, namespace, action)
 | `schedule-manage` | `schedule-read`, `schedule-write` |
 | `activity-manage` | `activity-read`, `activity-write` |
 | `read-all` | Every read group. It does not hold `workflow-query`. |
-| `delete-all` | Every delete group. The shipped policy forbids it. |
+| `delete-all` | Every group that deletes data or its audit trail: workflow, schedule and activity deletes. The shipped policy forbids it. Cluster management deletes (worker deployments and versions, workflow rules, namespaces) are in the admin groups, which are granted by name. |
 
   No aggregate holds an admin or delete leaf group. An RPC the image does not
   know is in no group, so only a permit that names it, or a customer group
@@ -93,8 +93,8 @@ decision = f(identity, namespace, action)
   `read-only` becomes `read-all`, `break-glass` becomes `workflow-admin`, and
   `forbidden-all` becomes `delete-all`. A permit that names no `action` (or
   uses an `action` wildcard) grants every RPC, including the admin groups and
-  RPCs with no group, and the `delete-all` floor is the only thing that stops
-  destruction. Give every permit an `action in [...]` list. Or add a forbid
+  RPCs with no group, and the `delete-all` floor stops only data deletion; the admin
+  groups are stopped by granting them to no one. Give every permit an `action in [...]` list. Or add a forbid
   that excepts the admin tooling workload, because a forbid beats every
   permit, including the admin one:
   `forbid (principal, action in [Action::"namespace-admin", Action::"cluster-admin"], resource) unless { principal == Workload::"<admin tooling SPIFFE ID>" };`
