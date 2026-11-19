@@ -35,6 +35,7 @@ func TestVerbClassOf(t *testing.T) {
 		{svc + "PollNexusOperationExecution", VerbStartSignal},
 		{svc + "ExecuteMultiOperation", VerbStartSignal},
 		{svc + "GetSystemInfo", VerbReadOnly},
+		{svc + "GetClusterInfo", VerbReadOnly},
 		{svc + "GetSearchAttributes", VerbReadOnly},
 
 		{svc + "DescribeNamespace", VerbReadOnly},
@@ -46,6 +47,8 @@ func TestVerbClassOf(t *testing.T) {
 		{svc + "PollWorkflowTaskQueue", VerbWorker},
 		{svc + "RespondActivityTaskCompleted", VerbWorker},
 		{svc + "RecordActivityTaskHeartbeat", VerbWorker},
+		{svc + "RecordWorkerHeartbeat", VerbWorker},
+		{svc + "ShutdownWorker", VerbWorker},
 
 		{svc + "TerminateWorkflowExecution", VerbBreakGlass},
 		{svc + "RequestCancelWorkflowExecution", VerbBreakGlass},
@@ -86,7 +89,7 @@ func TestVerbClassOf(t *testing.T) {
 		{svc + "DeprecateNamespace", VerbNamespaceAdmin},
 
 		// A GetXxx without History is not read-only by the prefix rule.
-		{svc + "GetClusterInfo", VerbUnknown},
+		{svc + "GetWorkerTaskReachability", VerbUnknown},
 		{svc + "SomeBrandNewRPC", VerbUnknown},
 	}
 

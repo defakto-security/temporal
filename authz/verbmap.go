@@ -78,6 +78,13 @@ var exactVerbClass = map[string]VerbClass{
 	"PollActivityExecution":       VerbStartSignal,
 	"PollNexusOperationExecution": VerbStartSignal,
 
+	// Worker lifecycle RPCs the Go SDK (v1.44+) sends from every worker,
+	// including the Temporal server's own internal worker. Without these they
+	// fall to VerbUnknown, which observe mode never forgives.
+	"RecordWorkerHeartbeat": VerbWorker,
+	"ShutdownWorker":        VerbWorker,
+
+	"GetClusterInfo":      VerbReadOnly,
 	"GetSystemInfo":       VerbReadOnly,
 	"GetSearchAttributes": VerbReadOnly,
 
