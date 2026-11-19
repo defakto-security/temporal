@@ -95,7 +95,7 @@ func TestAuthorize_ReferencePolicy(t *testing.T) {
 		// (the on-call gate, FRY-1374, is not built), so the shipped default
 		// must DENY break-glass to humans. Re-enable both the permit and this
 		// expectation together once the gate exists.
-		{"human break-glass denied by default policy", authn.RoleClassHuman, svc + "TerminateWorkflowExecution", false},
+		{"human workflow-admin denied by default policy", authn.RoleClassHuman, svc + "TerminateWorkflowExecution", false},
 		{"human worker denied", authn.RoleClassHuman, svc + "PollActivityTaskQueue", false},
 		{"destruction forbidden for service", authn.RoleClassService, svc + "DeleteWorkflowExecution", false},
 		{"destruction forbidden for human", authn.RoleClassHuman, svc + "DeleteWorkflowExecution", false},
@@ -154,15 +154,15 @@ func TestAuthorize_NilCaller(t *testing.T) {
 const scopedPolicy = `
 permit (
   principal == Workload::"` + svcID + `",
-  action in [Action::"start-signal", Action::"worker"],
+  action in [Action::"workflow-start", Action::"worker-ops"],
   resource == Namespace::"payments"
 );
 permit (
   principal in RoleClass::"service",
-  action in [Action::"start-signal", Action::"worker"],
+  action in [Action::"workflow-start", Action::"worker-ops"],
   resource == Namespace::"shared"
 ) when { principal.trust_domain == "corp.defakto.security" && principal.ns == "billing" };
-forbid (principal, action == Action::"forbidden-all", resource);
+forbid (principal, action in Action::"delete-all", resource);
 `
 
 // TestAuthorize_PerWorkloadScoping is a test helper or test case in this package.
@@ -270,7 +270,7 @@ func TestAuthorize_CustomAttributeInPolicy(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.cedar")
-	policy := `permit (principal in RoleClass::"service", action in [Action::"start-signal"], resource)
+	policy := `permit (principal in RoleClass::"service", action in [Action::"workflow-start"], resource)
 	  when { principal.trust_domain == "corp.defakto.security" && principal.nameSpace == "payments" };`
 	require.NoError(t, os.WriteFile(path, []byte(policy), 0o600))
 	cfg := &spiffeconfig.Config{

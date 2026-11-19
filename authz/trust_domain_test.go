@@ -49,7 +49,7 @@ func TestPolicyLoad_AcceptsScopedPolicies(t *testing.T) {
 		`permit (principal in RoleClass::"service", action, resource) when { principal.trust_domain == "corp.defakto.security" };`,
 		`permit (principal in RoleClass::"service", action, resource) unless { principal.trust_domain != "corp.defakto.security" };`,
 		`permit (principal == Workload::"spiffe://corp.defakto.security/ns/a/sa/b", action, resource);`,
-		`forbid (principal, action == Action::"forbidden-all", resource);`,
+		`forbid (principal, action in Action::"delete-all", resource);`,
 	} {
 		require.NoError(t, loadPolicy(t, pol), pol)
 	}
@@ -112,5 +112,5 @@ func TestForgedToken_MapperThenAuthorizer(t *testing.T) {
 	require.Len(t, logger.decisions(decisionWouldDeny), 1)
 	res, err = obs.Authorize(context.Background(), claims, terminate)
 	require.NoError(t, err)
-	require.Equal(t, authorization.DecisionDeny, res.Decision, "break-glass is never forgiven")
+	require.Equal(t, authorization.DecisionDeny, res.Decision, "workflow-admin is never forgiven")
 }

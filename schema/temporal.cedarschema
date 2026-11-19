@@ -13,12 +13,40 @@ entity Workload in [RoleClass] {
   // Customer attributes from config `attributes` are not listed here: the
   // schema is a CI/documentation artifact and runtime does not depend on it.
 };
-entity VerbClass;
 entity Namespace;
 
-action "read-only", "start-signal", "worker", "break-glass", "namespace-admin", "cluster-admin",
-       "forbidden-all"
-  appliesTo {
-    principal: [Workload],
-    resource: [Namespace],
-  };
+// Every RPC is an action named "<Service>/<Method>", for example
+// "WorkflowService/QueryWorkflow". The authorizer builds each one at request
+// time from the call's API name and makes its shipped leaf group (and any
+// customer actionGroups) its parent. They are not listed here: there are about
+// 150, and a Temporal upgrade changes them. TestWorkflowServiceClassified keeps
+// the group table in authz/verbmap.go in step with the generated API.
+
+// Shipped aggregates: groups of groups.
+action "workflow-interact" in ["workflow-client"];
+action "workflow-client";
+action "schedule-manage";
+action "activity-manage";
+action "read-all";
+action "delete-all";
+
+// Shipped leaf groups. Each RPC the image knows is a member of exactly one.
+action "workflow-read" in ["workflow-client", "read-all"];
+action "workflow-query" in ["workflow-interact"];
+action "workflow-start" in ["workflow-client"];
+action "workflow-signal" in ["workflow-interact"];
+action "workflow-admin";
+action "workflow-delete" in ["delete-all"];
+action "metadata-read" in ["workflow-client", "read-all"];
+action "schedule-read" in ["schedule-manage", "read-all"];
+action "schedule-write" in ["schedule-manage"];
+action "schedule-delete" in ["delete-all"];
+action "activity-read" in ["activity-manage", "read-all"];
+action "activity-write" in ["activity-manage"];
+action "activity-admin";
+action "activity-delete" in ["delete-all"];
+action "worker-ops";
+action "deployment-read" in ["read-all"];
+action "deployment-admin";
+action "namespace-admin";
+action "cluster-admin";

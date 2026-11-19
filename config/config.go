@@ -85,6 +85,14 @@ type Config struct {
 	// the captured text is the attribute value, or "" when it does not match. A name that equals a default (ns, sa) replaces it. trust_domain is always the ID's own trust domain and cannot be set here.
 	Attributes map[string]string `yaml:"attributes"`
 
+	// ActionGroups defines customer groups of Cedar actions, so a policy can say
+	// `action in Action::"payments-ops"`. A member is an RPC action such as
+	// "WorkflowService/QueryWorkflow", or the name of a shipped or customer group.
+	// A group cannot reuse a shipped name and cannot change what a shipped group
+	// holds. An RPC the image does not know can be a member, so a new Temporal
+	// RPC can be permitted without a new image.
+	ActionGroups map[string][]string `yaml:"actionGroups"`
+
 	// DatabaseIAM turns on RDS IAM authentication for Temporal's Postgres
 	// stores (IRSA, no stored password). Off by default.
 	DatabaseIAM DatabaseIAMConfig `yaml:"databaseIAM"`
@@ -114,7 +122,7 @@ type Config struct {
 	// decision="allow" with the
 	// reason, so you can find callers without a valid identity before turning
 	// enforcement on. Policy decisions are unaffected: a missing or broken live
-	// policy still denies, and calls to forbidden-all, break-glass, namespace-admin, cluster-admin or
+	// policy still denies, and calls to admin, delete or
 	// unclassified APIs stay denied. Observe is no stricter than running with
 	// no authorizer at all; do not leave it on once callers are identified.
 	IdentityMode string `yaml:"identityMode"`
@@ -243,8 +251,37 @@ func (c *Config) Validate() error {
 	if _, err := c.AttributeRules(); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateActionGroups(c.ActionGroups); err != nil {
+		errs = append(errs, err)
+	}
 	if iam := c.DatabaseIAM; iam.Enabled && (iam.RefreshInterval < MinRefreshInterval || iam.RefreshInterval > 14*time.Minute) {
 		errs = append(errs, errors.New("databaseIAM.refreshInterval must be between 30s and 14m (tokens last 15m)"))
+	}
+	return errors.Join(errs...)
+}
+
+var (
+	// groupNameRE is the shape of a customer group name. It has no "/", so it
+	// can never be taken for an RPC action.
+	groupNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+	// rpcActionRE is the shape of an RPC action name, "<Service>/<Method>".
+	rpcActionRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*/[A-Za-z][A-Za-z0-9]*$`)
+)
+
+// validateActionGroups checks the shape of group names and members. Whether a
+// member exists, and whether a name reuses a shipped group, is checked when the
+// authorizer starts, because the shipped groups live in package authz.
+func validateActionGroups(groups map[string][]string) error {
+	var errs []error
+	for name, members := range groups {
+		if !groupNameRE.MatchString(name) {
+			errs = append(errs, fmt.Errorf("actionGroups: group name %q must be lowercase letters, digits and dashes", name))
+		}
+		for _, m := range members {
+			if !groupNameRE.MatchString(m) && !rpcActionRE.MatchString(m) {
+				errs = append(errs, fmt.Errorf("actionGroups[%s]: member %q must be a group name or an RPC like WorkflowService/QueryWorkflow", name, m))
+			}
+		}
 	}
 	return errors.Join(errs...)
 }

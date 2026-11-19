@@ -157,11 +157,11 @@ func TestShadow_LiveAllowsCandidateDenies(t *testing.T) {
 	require.Len(t, wd, 1)
 	require.Equal(t, svcID, wd[0].fields["principal"])
 	require.Equal(t, "billing", wd[0].fields["namespace"])
-	require.Equal(t, "start-signal", wd[0].fields["verb"])
+	require.Equal(t, "workflow-start", wd[0].fields["verb"])
 	require.Equal(t, "worker", wd[0].fields["attributes"].(map[string]string)["sa"])
 	require.Equal(t, "delta", wd[0].fields["shadowDecision"])
 	// One counter per call: live allow, shadow delta.
-	require.Equal(t, []countRecord{{decisionAllow, shadowDelta, "start-signal", reasonAllowed}}, h.counts)
+	require.Equal(t, []countRecord{{decisionAllow, shadowDelta, "workflow-start", reasonAllowed}}, h.counts)
 
 	// Candidate agrees: no would_deny.
 	logger.lines = nil
@@ -197,7 +197,7 @@ func TestShadow_LiveDeniesCandidateAllows(t *testing.T) {
 	require.Equal(t, authorization.DecisionDeny, res.Decision, "live decision is enforced")
 	require.Len(t, logger.decisions(decisionWouldAllow), 1)
 	require.Empty(t, logger.decisions(decisionWouldDeny))
-	require.Equal(t, []countRecord{{decisionDeny, shadowDelta, "start-signal", reasonDeniedByPolicy}}, h.counts)
+	require.Equal(t, []countRecord{{decisionDeny, shadowDelta, "workflow-start", reasonDeniedByPolicy}}, h.counts)
 
 	// Both agree on deny: no divergence.
 	logger.lines = nil
@@ -304,7 +304,7 @@ func TestIdentityMode_ObserveStillEnforcesPolicy(t *testing.T) {
 	a, logger, h := newAuthorizerWith(t, scopedPolicy, "", spiffeconfig.DecisionLogOff, spiffeconfig.IdentityModeObserve)
 	require.Equal(t, authorization.DecisionDeny, call(t, a, svcID, "billing").Decision)
 	require.Empty(t, logger.decisions(decisionWouldDeny))
-	require.Equal(t, []countRecord{{decisionDeny, decisionDeny, "start-signal", reasonDeniedByPolicy}}, h.counts)
+	require.Equal(t, []countRecord{{decisionDeny, decisionDeny, "workflow-start", reasonDeniedByPolicy}}, h.counts)
 }
 
 func TestConfig_IdentityModeValidation(t *testing.T) {
