@@ -14,13 +14,62 @@ See the design of record: [Defakto SPIFFE Temporal](https://linear.app/defakto/p
 ## Authorization model
 
 ```
-decision = f(role_class, namespace, verb_class)
+decision = f(identity, namespace, action)
 ```
 
 - **role_class** ∈ {`service`, `human`} — derived structurally from the SPIFFE
   identity by the claim mapper. Authentication only; no verb grants.
-- **verb_class** — `read-only` · `start-signal` · `worker` · `break-glass` ·
-  `namespace-admin` · `cluster-admin` · `forbidden-all`, mapped from `target.APIName` (`authz/verbmap.go`).
+- **action** — one RPC, named `<Service>/<Method>`, such as
+  `Action::"WorkflowService/QueryWorkflow"`. The image ships groups of RPCs
+  (`authz/verbmap.go`), and a permit can name a group, a list, or one RPC.
+  Customers add groups with `actionGroups` in config.
+
+| Shipped leaf group | Holds |
+|---|---|
+| `workflow-read` | Describe, List, Count, Scan, history |
+| `workflow-query` | `QueryWorkflow` (runs workflow code) |
+| `workflow-start` | Start, SignalWithStart, ExecuteMultiOperation |
+| `workflow-signal` | Signal, Update, PollWorkflowExecutionUpdate |
+| `workflow-admin` | Terminate, RequestCancel, Reset, Pause, Unpause, UpdateOptions, batch ops |
+| `workflow-delete` | `DeleteWorkflowExecution` (both services) |
+| `metadata-read` | System, cluster and search attribute info, namespaces, task queues, workers, batch and rule reads |
+| `schedule-read` · `schedule-write` · `schedule-delete` | Schedule RPCs |
+| `activity-read` · `activity-write` · `activity-admin` · `activity-delete` | Standalone activity and Nexus operation RPCs |
+| `worker-ops` | Poll, Respond, heartbeat, ShutdownWorker, sticky reset, worker config update |
+| `deployment-read` · `deployment-admin` | Worker deployment, versioning and task queue config |
+| `namespace-admin` | Register, Update, Deprecate namespace, workflow rules |
+| `cluster-admin` | Every AdminService and OperatorService method, except the delete |
+
+| Shipped aggregate | Holds |
+|---|---|
+| `workflow-interact` | `workflow-query`, `workflow-signal` |
+| `workflow-client` | `workflow-read`, `metadata-read`, `workflow-start`, `workflow-interact` |
+| `schedule-manage` | `schedule-read`, `schedule-write` |
+| `activity-manage` | `activity-read`, `activity-write` |
+| `read-all` | Every read group. It does not hold `workflow-query`. |
+| `delete-all` | Every delete group. The shipped policy forbids it. |
+
+  No aggregate holds an admin or delete leaf group. An RPC the image does not
+  know is in no group, so only a permit that names it, or a customer group
+  that holds it, allows it. A new Temporal RPC therefore needs no new image:
+  add `permit (..., action == Action::"WorkflowService/NewRpc", ...)`.
+  A test fails when an API upgrade adds an RPC the table does not list.
+- **actionGroups** — your own bundles. A member is an RPC such as
+  `WorkflowService/QueryWorkflow`, or a shipped or customer group. A group
+  cannot reuse a shipped name, name a group that does not exist, or form a
+  cycle, and it cannot change what a shipped group holds. So a `forbid` on a
+  shipped group keeps covering the same RPCs.
+
+  ```yaml
+  actionGroups:
+    payments-ops: [workflow-read, WorkflowService/QueryWorkflow]
+  ```
+
+  ```cedar
+  permit (principal == Workload::"spiffe://corp.example/ns/payments/sa/x",
+          action in Action::"payments-ops", resource == Namespace::"payments")
+    when { principal.trust_domain == "corp.example" };
+  ```
 - **policy** — wholly customer-owned Cedar, loaded from the mounted ConfigMap.
   No compiled-in forbid set. The authorizer **fails closed** on an absent,
   unparseable, or invalid policy. The shipped `reference/policy.cedar` forbids
@@ -36,22 +85,22 @@ decision = f(role_class, namespace, verb_class)
   cluster its own `workloadAPI.audience`. A token with more than one audience
   is refused.
 - `identityMode: observe` lets callers without a valid identity through (the
-  forbidden-all, break-glass, namespace-admin and cluster-admin verbs stay denied). It is a rollout aid.
-- **Upgrade note: admin verb classes.** `namespace-admin` and `cluster-admin`
-  are new. Every AdminService and OperatorService method now maps to
-  `cluster-admin`, and `RegisterNamespace`, `UpdateNamespace` and
-  `DeprecateNamespace` map to `namespace-admin`. That includes
-  `DeleteNamespace`, `RemoveRemoteCluster`, `RemoveTask` and
-  `DescribeMutableState`. These methods were unclassified and denied before.
-  A permit that does not name an `action` (or uses an `action` wildcard) now
-  grants them, and the `forbidden-all` floor does not block them. Before you
-  upgrade, add `action in [...]` lists to such permits (preferred). Or add
-  a forbid that excepts the admin tooling workload, because a forbid beats
-  every permit, including the admin one:
+  admin and delete groups, and RPCs with no shipped group, stay denied). It is a rollout aid.
+- **Upgrade note: actions are RPCs.** The old classes (`read-only`,
+  `start-signal`, `worker`, `break-glass`, `forbidden-all`) are gone. Rewrite
+  `action` lists with the groups above: `start-signal` becomes
+  `workflow-start` and `workflow-interact`, `worker` becomes `worker-ops`,
+  `read-only` becomes `read-all`, `break-glass` becomes `workflow-admin`, and
+  `forbidden-all` becomes `delete-all`. A permit that names no `action` (or
+  uses an `action` wildcard) grants every RPC, including the admin groups and
+  RPCs with no group, and the `delete-all` floor is the only thing that stops
+  destruction. Give every permit an `action in [...]` list. Or add a forbid
+  that excepts the admin tooling workload, because a forbid beats every
+  permit, including the admin one:
   `forbid (principal, action in [Action::"namespace-admin", Action::"cluster-admin"], resource) unless { principal == Workload::"<admin tooling SPIFFE ID>" };`
   then permit that workload by exact ID. The shipped policy grants neither
-  class. `DeleteWorkflowExecution` on both services stays
-  `forbidden-all`.
+  group. `DeleteWorkflowExecution` on both services is in `workflow-delete`,
+  so it stays forbidden.
 - Temporal's own services (worker, scheduler) carry no JWT-SVID. Set
   `clientCertAuth: true` to identify them by their X.509-SVID client cert
   (URI SAN = SPIFFE ID). Any `authorization` header, even blank, wins and is

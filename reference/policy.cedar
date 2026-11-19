@@ -4,7 +4,7 @@
 // It is the entire policy — there is no compiled-in forbid set. The destruction
 // verbs are forbidden here by default; a customer owns the decision to change that.
 //
-// Model: decision = f(identity, namespace, verb_class)
+// Model: decision = f(identity, namespace, action)
 //   Principal = Workload::"<spiffe id>", always a member of its role class:
 //               `principal in RoleClass::"service"` | `principal in RoleClass::"human"`
 //               Attributes: principal.trust_domain, principal.ns, principal.sa by default
@@ -20,14 +20,27 @@
 //               principal with `== RoleClass::"x"` is rejected at load.
 //               Write denies as allow-lists: `forbid ... when { principal.ns ==
 //               "prod" }` does not fire when ns is "" (an ID of another shape).
-//   Action    = Action::"read-only" | "start-signal" | "worker" | "break-glass" | "namespace-admin" | "cluster-admin" | "forbidden-all"
+//   Action    = one RPC, named "<Service>/<Method>", for example
+//               Action::"WorkflowService/QueryWorkflow". The image ships groups of
+//               RPCs, so a permit can say `action in Action::"workflow-interact"`.
+//               Leaf groups: workflow-read, workflow-query, workflow-start,
+//               workflow-signal, workflow-admin, workflow-delete, metadata-read,
+//               schedule-read, schedule-write, schedule-delete, activity-read,
+//               activity-write, activity-admin, activity-delete, worker-ops,
+//               deployment-read, deployment-admin, namespace-admin, cluster-admin.
+//               Aggregates: workflow-interact (query, signal), workflow-client
+//               (read, start, query, signal), schedule-manage, activity-manage,
+//               read-all, delete-all. No aggregate holds an admin or delete leaf.
+//               Add your own groups with `actionGroups:` in config.yaml, or name
+//               one RPC. An RPC the image does not know is in no group: only a
+//               permit that names it (or a customer group that holds it) allows it.
 //   Resource  = Namespace::"<name>"
 
 // --- service ---------------------------------------------------------------
-// Workloads get start/signal and the worker loop in any namespace.
+// Workloads get start, query, signal and the worker loop in any namespace.
 permit (
   principal in RoleClass::"service",
-  action in [Action::"start-signal", Action::"worker"],
+  action in [Action::"workflow-start", Action::"workflow-interact", Action::"worker-ops"],
   resource
 ) when { principal.trust_domain == "corp.defakto.security" };
 
@@ -36,7 +49,7 @@ permit (
 // cert and no header. Needed when you narrow the broad service permit above.
 permit (
   principal in RoleClass::"service",
-  action in [Action::"start-signal", Action::"worker", Action::"read-only"],
+  action in [Action::"workflow-client", Action::"schedule-manage", Action::"worker-ops"],
   resource
 ) when {
   principal.trust_domain == "corp.defakto.security" &&
@@ -49,23 +62,32 @@ permit (
 //
 // permit (
 //   principal in RoleClass::"service",
-//   action in [Action::"start-signal", Action::"worker"],
+//   action in [Action::"workflow-start", Action::"workflow-interact", Action::"worker-ops"],
 //   resource == Namespace::"payments"
 // ) when { principal.trust_domain == "corp.defakto.security" && principal.ns == "payments" };
 //
 // Or name one exact identity (the ID includes its trust domain):
 //   principal == Workload::"spiffe://corp.example/ns/payments/sa/worker"
 
+// Mix groups and single RPCs when a bundle does not fit. This one reads and
+// queries everywhere, but signals only in "payments":
+//
+// permit (principal == Workload::"spiffe://corp.example/ns/ops/sa/tool",
+//   action in [Action::"workflow-read", Action::"workflow-query"], resource);
+// permit (principal == Workload::"spiffe://corp.example/ns/ops/sa/tool",
+//   action in Action::"workflow-signal", resource == Namespace::"payments");
+
 // --- human -----------------------------------------------------------------
 // Humans get read-all everywhere (secret-exfil safety is a CI check, not an
-// authorization boundary — see the project design).
+// authorization boundary — see the project design). read-all does not include
+// workflow-query, which runs workflow code.
 permit (
   principal in RoleClass::"human",
-  action == Action::"read-only",
+  action in Action::"read-all",
   resource
 ) when { principal.trust_domain == "corp.defakto.security" };
 
-// break-glass (Terminate / RequestCancel / Reset) for humans.
+// workflow-admin (Terminate / RequestCancel / Reset / Pause / batch) for humans.
 //
 // SHIPPED DISABLED ON PURPOSE. The on-call-grant gate (FRY-1374) is not built
 // yet: the authorizer does not check on-call status before consulting Cedar,
@@ -76,13 +98,13 @@ permit (
 //
 // permit (
 //   principal in RoleClass::"human",
-//   action == Action::"break-glass",
+//   action in Action::"workflow-admin",
 //   resource
 // );
 
-// namespace-admin (Register / Update / Deprecate namespace) and cluster-admin
-// (every AdminService and OperatorService method) are granted to no one by
-// default. Give them to the admin tooling workload only, by exact ID.
+// namespace-admin (Register / Update / Deprecate namespace, workflow rules),
+// deployment-admin, activity-admin and cluster-admin (every AdminService and
+// OperatorService method) are granted to no one by default. Give them to the admin tooling workload only, by exact ID.
 //
 // permit (
 //   principal == Workload::"spiffe://corp.defakto.security/ns/temporal/sa/temporal-admintools",
@@ -91,10 +113,11 @@ permit (
 // );
 
 // --- floor (customer-editable) ---------------------------------------------
-// Destruction / shard-admin verbs: forbidden to everyone by default.
+// Destruction: forbidden to everyone by default. delete-all holds every delete
+// group, so one rule covers them all.
 // deny-overrides means this wins over any permit above.
 forbid (
   principal,
-  action == Action::"forbidden-all",
+  action in Action::"delete-all",
   resource
 );

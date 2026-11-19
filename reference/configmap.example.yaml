@@ -72,8 +72,8 @@ data:
     # "observe" lets a call that fails these through and logs
     # as `would_deny`, and counts it as decision="allow" with a reason (unauthenticated,
     # unknown_role_class, malformed_subject). Run it until none appear, then
-    # switch to enforce. Policy decisions are always enforced, and forbidden-all,
-    # break-glass, namespace-admin, cluster-admin and unclassified APIs stay denied. Observe is no stricter than
+    # switch to enforce. Policy decisions are always enforced, and the admin and
+    # delete groups, and RPCs the image has no group for, stay denied. Observe is no stricter than
     # having no authorizer: turn it off once callers are identified.
     # identityMode: observe
     # A candidate policy. Every call is also checked against it; the live
@@ -81,19 +81,28 @@ data:
     # candidate denies) and `would_allow` (live denied, candidate allows). The
     # metric shows a disagreement as shadow_decision="delta". Must differ from policyPath.
     # shadowPolicyPath: /etc/defakto-spiffe-temporal/policy.next.cedar
+    # Your own groups of Cedar actions. A member is an RPC ("<Service>/<Method>")
+    # or a shipped or customer group. A group cannot reuse a shipped name. Use it
+    # in policy as `action in Action::"payments-ops"`. An RPC the image does not
+    # know can be a member, so a new Temporal RPC needs no new image.
+    # actionGroups:
+    #   payments-ops:
+    #     - workflow-read
+    #     - WorkflowService/QueryWorkflow
+    #     - WorkflowService/GetWorkerTaskReachability
 
   # The customer-owned Cedar policy. This copy is the shipped reference
   # (destruction verbs forbidden by default); edit to set your own floor.
   policy.cedar: |
     permit (principal in RoleClass::"service",
-            action in [Action::"start-signal", Action::"worker"], resource)
+            action in [Action::"workflow-start", Action::"workflow-interact", Action::"worker-ops"], resource)
       when { principal.trust_domain == "corp.defakto.security" };
     // Temporal's own worker (clientCertAuth).
     permit (principal in RoleClass::"service",
-            action in [Action::"start-signal", Action::"worker", Action::"read-only"], resource)
+            action in [Action::"workflow-client", Action::"schedule-manage", Action::"worker-ops"], resource)
       when { principal.trust_domain == "corp.defakto.security" &&
              principal.ns == "temporal" && principal.sa == "temporal-worker" };
     permit (principal in RoleClass::"human",
-            action == Action::"read-only", resource)
+            action in Action::"read-all", resource)
       when { principal.trust_domain == "corp.defakto.security" };
-    forbid (principal, action == Action::"forbidden-all", resource);
+    forbid (principal, action in Action::"delete-all", resource);
