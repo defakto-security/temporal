@@ -44,6 +44,10 @@ type CedarAuthorizer struct {
 	// and reports it as would_deny instead.
 	observeIdentity bool
 
+	// groups is the action group hierarchy: shipped groups plus the customer's
+	// config actionGroups. Read-only after construction.
+	groups *actionGroups
+
 	// namespaces bounds the metric namespace tag; see namespaceTag.
 	nsMu       sync.Mutex
 	namespaces map[string]struct{}
@@ -96,7 +100,13 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 	if err != nil {
 		return nil, err
 	}
+	groups, err := newActionGroups(cfg.ActionGroups)
+	if err != nil {
+		_ = ps.Close()
+		return nil, err
+	}
 	a := &CedarAuthorizer{
+		groups:      groups,
 		policies:    ps,
 		attrs:       newAttributeRules(rules),
 		logger:      logger,
@@ -108,7 +118,7 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 	}
 	if a.observeIdentity {
 		logger.Warn("identityMode=observe: calls without a valid identity are ALLOWED and only reported; " +
-			"forbidden-all, break-glass, namespace-admin, cluster-admin and unclassified APIs stay denied")
+			"admin, delete and unclassified APIs stay denied")
 	}
 	if cfg.ShadowPolicyPath != "" {
 		sh, err := newPolicySource(cfg.ShadowPolicyPath, logger)
@@ -164,10 +174,9 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 	// Identity observe mode: a call that failed a pre-policy identity check is
 	// let through and reported, so callers without a valid identity can be
 	// found before enforcement is turned on.
-	// Even then, the verbs the reference policy forbids for everyone
-	// (forbidden-all, break-glass, namespace-admin, cluster-admin) stay denied, so a caller never gains those
-	// by dropping its credential.
-	if a.observeIdentity && d.identityFailure && !alwaysDenied(VerbClassOf(target.APIName)) {
+	// Even then, the admin and delete groups, and any RPC the image has no group
+	// for, stay denied, so a caller never gains those by dropping its credential.
+	if a.observeIdentity && d.identityFailure && !alwaysDenied(LeafGroup(target.APIName)) {
 		d.forgiven = true
 		d.decision = decisionAllow
 		res = authorization.Result{Decision: authorization.DecisionAllow}
@@ -178,10 +187,10 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 	return res, nil
 }
 
-// alwaysDenied reports verb classes that observe mode never forgives.
-func alwaysDenied(v VerbClass) bool {
-	return v == VerbForbiddenAll || v == VerbBreakGlass || v == VerbUnknown ||
-		v == VerbNamespaceAdmin || v == VerbClusterAdmin
+// alwaysDenied reports leaf groups that observe mode never forgives. An RPC
+// with no shipped group ("") is never forgiven.
+func alwaysDenied(leaf string) bool {
+	return leaf == "" || neverForgiven[leaf]
 }
 
 // deny builds a denial Result carrying reason.
@@ -219,15 +228,14 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 	}
 	d.attributes = attributesOf(entities, principal)
 
-	verb := VerbClassOf(target.APIName)
-	if verb == VerbUnknown {
-		return d.fail(reasonUnknownVerb, "unknown verb class: "+target.APIName, false)
-	}
-	d.verb = string(verb)
-
+	// The action is the RPC itself. Its shipped group and any customer groups
+	// are its parents, so a policy can permit the RPC by name or by group. An
+	// RPC with no shipped group is denied unless a permit names it.
+	d.verb = LeafGroup(target.APIName)
+	action := a.groups.addActionEntities(entities, target.APIName)
 	req := cedar.Request{
 		Principal: principal,
-		Action:    cedar.NewEntityUID(actionAccess, types.String(verb)),
+		Action:    action,
 		Resource:  cedar.NewEntityUID(entityNamespace, types.String(target.Namespace)),
 	}
 	d.req, d.entities = &req, entities
@@ -241,6 +249,9 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 		return d.fail(reasonPolicyError, "policy evaluation error", false)
 	case allowed:
 		return authorization.Result{Decision: authorization.DecisionAllow}
+	}
+	if d.verb == "" {
+		return d.fail(reasonUnknownVerb, "unclassified API: "+target.APIName, false)
 	}
 	return d.fail(reasonDeniedByPolicy, "denied by policy", false)
 }
