@@ -205,27 +205,33 @@ var shippedGroupParents = func() map[string][]string {
 	return m
 }()
 
+// leafGroups is every shipped leaf group. It is built from leafMembers plus
+// cluster-admin, which has no member table because it is every Admin and
+// Operator RPC.
+var leafGroups = func() map[string]bool {
+	m := map[string]bool{GroupClusterAdmin: true}
+	for g := range leafMembers {
+		m[g] = true
+	}
+	return m
+}()
+
 // shippedGroupNames is every shipped group, leaf and aggregate.
 func shippedGroupNames() []string {
 	var out []string
-	for g := range leafMembers {
+	for g := range leafGroups {
 		out = append(out, g)
 	}
 	for g := range shippedAggregates {
 		out = append(out, g)
-	}
-	if _, ok := leafMembers[GroupClusterAdmin]; !ok {
-		out = append(out, GroupClusterAdmin)
 	}
 	sort.Strings(out)
 	return out
 }
 
 func isShippedGroup(name string) bool {
-	_, leaf := leafMembers[name]
 	_, agg := shippedAggregates[name]
-	// cluster-admin has no member table: it is every Admin and Operator RPC.
-	return leaf || agg || name == GroupClusterAdmin
+	return leafGroups[name] || agg
 }
 
 // ActionName turns a full gRPC API name into its Cedar action name.

@@ -49,7 +49,8 @@ decision = f(identity, namespace, action)
 | `read-all` | Every read group. It does not hold `workflow-query`. |
 | `delete-all` | Every group that deletes data or its audit trail: workflow, schedule and activity deletes. The shipped policy forbids it. Cluster management deletes (worker deployments and versions, workflow rules, namespaces) are in the admin groups, which are granted by name. |
 
-  No aggregate holds an admin or delete leaf group. An RPC the image does not
+  No aggregate holds an admin leaf group. The only aggregate that holds delete
+  leaf groups is `delete-all`, which the shipped policy forbids. An RPC the image does not
   know is in no group, so only a permit that names it, or a customer group
   that holds it, allows it. A new Temporal RPC therefore needs no new image:
   add `permit (..., action == Action::"WorkflowService/NewRpc", ...)`.
@@ -92,8 +93,9 @@ decision = f(identity, namespace, action)
   `workflow-start` and `workflow-interact`, `worker` becomes `worker-ops`,
   `read-only` becomes `read-all`, `break-glass` becomes `workflow-admin`, and
   `forbidden-all` becomes `delete-all`. A permit that names no `action` (or
-  uses an `action` wildcard) grants every RPC, including the admin groups and
-  RPCs with no group, and the `delete-all` floor stops only data deletion; the admin
+  uses an `action` wildcard) grants every RPC that has a shipped group, including
+  the admin groups. It never grants an RPC with no group: only a permit that
+  names that RPC, or a customer group holding it, does. and the `delete-all` floor stops only data deletion; the admin
   groups are stopped by granting them to no one. Give every permit an `action in [...]` list. Or add a forbid
   that excepts the admin tooling workload, because a forbid beats every
   permit, including the admin one:

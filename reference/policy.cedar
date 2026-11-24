@@ -30,7 +30,7 @@
 //               deployment-read, deployment-admin, namespace-admin, cluster-admin.
 //               Aggregates: workflow-interact (query, signal), workflow-client
 //               (read, start, query, signal), schedule-manage, activity-manage,
-//               read-all, delete-all. No aggregate holds an admin or delete leaf.
+//               read-all, delete-all. No aggregate holds an admin leaf. Only delete-all holds delete leaves.
 //               Add your own groups with `actionGroups:` in config.yaml, or name
 //               one RPC. An RPC the image does not know is in no group: only a
 //               permit that names it (or a customer group that holds it) allows it.

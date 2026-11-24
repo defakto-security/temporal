@@ -10,6 +10,7 @@ import (
 
 	cedar "github.com/cedar-policy/cedar-go"
 	"github.com/cedar-policy/cedar-go/types"
+	"github.com/cedar-policy/cedar-go/x/exp/ast"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/log"
@@ -239,7 +240,7 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 	}
 	d.req, d.entities = &req, entities
 
-	allowed, evalErr := a.evaluate(ps, entities, req)
+	allowed, evalErr := a.evaluate(ps, entities, req, d.verb == "")
 	switch {
 	case evalErr != "":
 		a.logger.Error("cedar policy evaluation error; denying",
@@ -260,12 +261,70 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 // attribute), so a broader permit could win where a deny was intended. Any
 // evaluation error is therefore reported to the caller, which fails closed;
 // it is never silently ignored.
-func (a *CedarAuthorizer) evaluate(ps *cedar.PolicySet, entities types.EntityMap, req cedar.Request) (allowed bool, evalErr string) {
+//
+// An ungrouped RPC (one the image has no shipped group for) is allowed only when
+// a permit names it: `action == Action::"<Service>/<Method>"`, or a group the
+// action belongs to, which can only be a customer group. A permit with no action
+// scope, or one that lists only shipped groups, never reaches it. This keeps a
+// new upstream RPC closed until someone decides on it. Forbids still win first.
+func (a *CedarAuthorizer) evaluate(ps *cedar.PolicySet, entities types.EntityMap, req cedar.Request, ungrouped bool) (allowed bool, evalErr string) {
 	decision, diag := cedar.Authorize(ps, entities, req)
 	if len(diag.Errors) > 0 {
 		return false, fmt.Sprintf("%v", diag.Errors)
 	}
-	return decision == cedar.Allow, ""
+	if decision != cedar.Allow {
+		return false, ""
+	}
+	if ungrouped && !anyPermitNamesAction(ps, diag.Reasons, entities, req.Action) {
+		return false, ""
+	}
+	return true, ""
+}
+
+// anyPermitNamesAction reports whether one of the permits that allowed the
+// request has an action scope that names the action or a group above it.
+func anyPermitNamesAction(ps *cedar.PolicySet, reasons []cedar.DiagnosticReason, entities types.EntityMap, action types.EntityUID) bool {
+	above := map[types.EntityUID]bool{action: true}
+	queue := []types.EntityUID{action}
+	for len(queue) > 0 {
+		e, ok := entities[queue[0]]
+		queue = queue[1:]
+		if !ok {
+			continue
+		}
+		for p := range e.Parents.All() {
+			if !above[p] {
+				above[p] = true
+				queue = append(queue, p)
+			}
+		}
+	}
+	allowing := make(map[cedar.PolicyID]bool, len(reasons))
+	for _, r := range reasons {
+		allowing[r.PolicyID] = true
+	}
+	for id, p := range ps.All() {
+		if !allowing[id] {
+			continue
+		}
+		switch sc := p.AST().Action.(type) {
+		case ast.ScopeTypeEq:
+			if above[sc.Entity] {
+				return true
+			}
+		case ast.ScopeTypeIn:
+			if above[sc.Entity] {
+				return true
+			}
+		case ast.ScopeTypeInSet:
+			for _, e := range sc.Entities {
+				if above[e] {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // runShadow evaluates the candidate policy for every call that reached policy
@@ -282,7 +341,7 @@ func (a *CedarAuthorizer) runShadow(d *decisionRecord, liveAllowed bool) {
 		a.logger.Error("shadow policy not loaded; skipping", tag.NewStringTag("apiName", d.apiName))
 		return
 	}
-	allowed, evalErr := a.evaluate(ps, d.entities, *d.req)
+	allowed, evalErr := a.evaluate(ps, d.entities, *d.req, d.verb == "")
 	switch {
 	case evalErr != "":
 		a.logger.Error("shadow policy evaluation error; ignoring",

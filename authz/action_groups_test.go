@@ -194,3 +194,53 @@ func TestCustomGroupCannotRedefineClusterAdmin(t *testing.T) {
 	_, err := groupsAuthorizer(t, loadReferencePolicy(t), map[string][]string{"cluster-admin": {"workflow-read"}})
 	require.Error(t, err)
 }
+
+// A permit with no action scope grants every RPC that has a shipped group, but
+// never an RPC with no group. Only a permit that names it, or a customer group
+// that holds it, does. A forbid still wins.
+func TestWildcardPermitDoesNotReachUngroupedRPC(t *testing.T) {
+	t.Parallel()
+	api := svc + "SomeBrandNewRPC"
+	wild := `permit (principal in RoleClass::"service", action, resource)` + scope + `;`
+	a, err := groupsAuthorizer(t, wild, nil)
+	require.NoError(t, err)
+	require.True(t, allowed(t, a, svcID, svc+"ListWorkflowExecutions", "p"), "grouped RPC still allowed")
+	require.False(t, allowed(t, a, svcID, api, "p"), "ungrouped RPC is not")
+
+	named := wild + `
+permit (principal in RoleClass::"service", action == Action::"WorkflowService/SomeBrandNewRPC", resource)` + scope + `;`
+	a, err = groupsAuthorizer(t, named, nil)
+	require.NoError(t, err)
+	require.True(t, allowed(t, a, svcID, api, "p"), "named RPC")
+
+	custom := wild + `
+permit (principal in RoleClass::"service", action in Action::"mine", resource)` + scope + `;`
+	a, err = groupsAuthorizer(t, custom, map[string][]string{"mine": {"WorkflowService/SomeBrandNewRPC"}})
+	require.NoError(t, err)
+	require.True(t, allowed(t, a, svcID, api, "p"), "customer group")
+
+	forbidden := named + `
+forbid (principal, action == Action::"WorkflowService/SomeBrandNewRPC", resource);`
+	a, err = groupsAuthorizer(t, forbidden, nil)
+	require.NoError(t, err)
+	require.False(t, allowed(t, a, svcID, api, "p"), "forbid wins")
+
+	listed := `permit (principal in RoleClass::"service", action in [Action::"read-all", Action::"worker-ops"], resource)` + scope + `;`
+	a, err = groupsAuthorizer(t, listed, nil)
+	require.NoError(t, err)
+	require.False(t, allowed(t, a, svcID, api, "p"), "shipped groups never hold it")
+}
+
+// cluster-admin is a shipped leaf group: a policy may name it, and a customer
+// may not redefine it.
+func TestClusterAdminIsShippedGroup(t *testing.T) {
+	t.Parallel()
+	require.True(t, isShippedGroup(GroupClusterAdmin))
+	require.Contains(t, shippedGroupNames(), GroupClusterAdmin)
+	_, err := groupsAuthorizer(t, `permit (principal in RoleClass::"service", action in Action::"cluster-admin", resource)`+scope+`;`, nil)
+	require.NoError(t, err)
+	_, err = groupsAuthorizer(t, loadReferencePolicy(t), map[string][]string{"cluster-admin": {"workflow-read"}})
+	require.ErrorContains(t, err, "shipped group")
+	_, err = groupsAuthorizer(t, loadReferencePolicy(t), map[string][]string{"mine": {"cluster-admin"}})
+	require.NoError(t, err)
+}
