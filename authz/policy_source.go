@@ -3,6 +3,8 @@ package authz
 import (
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"sync/atomic"
 
 	cedar "github.com/cedar-policy/cedar-go"
@@ -26,13 +28,16 @@ type policySource struct {
 	// Read on the hot path with no lock; swapped atomically on reload.
 	current atomic.Pointer[cedar.PolicySet]
 
+	// groups says which action names a policy may use. Nil skips the check.
+	groups *actionGroups
+
 	watcher *fsnotify.Watcher
 }
 
 // newPolicySource loads the policy at path once (which MUST succeed, or the
 // server refuses to start) and begins watching it for changes.
-func newPolicySource(path string, logger log.Logger) (*policySource, error) {
-	s := &policySource{path: path, logger: logger}
+func newPolicySource(path string, groups *actionGroups, logger log.Logger) (*policySource, error) {
+	s := &policySource{path: path, logger: logger, groups: groups}
 	if err := s.reload(); err != nil {
 		return nil, fmt.Errorf("initial policy load: %w", err)
 	}
@@ -63,6 +68,9 @@ func (s *policySource) reload() error {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
 	if err := requireTrustDomainScope(ps); err != nil {
+		return fmt.Errorf("policy %q: %w", s.path, err)
+	}
+	if err := s.groups.rejectUnknownActionGroups(ps); err != nil {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
 	s.current.Store(ps)
@@ -113,6 +121,62 @@ func conditionsReadTrustDomain(conds []ast.ConditionType) bool {
 func isPrincipalVar(n ast.IsNode) bool {
 	v, ok := n.(ast.NodeTypeVariable)
 	return ok && v.Name == "principal"
+}
+
+// rejectUnknownActionGroups refuses a policy whose action scope names a group
+// that is neither shipped nor in config actionGroups. A misspelled group, such as
+// "delte-all" in a forbid, would match nothing and silently stop forbidding.
+// A name with a "/" is one RPC, which a policy may name even when the image does
+// not know it yet, so it is not checked. The action scope and every when or
+// unless body are both checked.
+func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
+	if g == nil {
+		return nil
+	}
+	var bad []string
+	check := func(id cedar.PolicyID, uid types.EntityUID) {
+		name := string(uid.ID)
+		if uid.Type == actionAccess && !strings.Contains(name, "/") && !g.knownGroup(name) {
+			bad = append(bad, fmt.Sprintf("policy %s: unknown action group %q", id, name))
+		}
+	}
+	for id, p := range ps.All() {
+		switch sc := p.AST().Action.(type) {
+		case ast.ScopeTypeEq:
+			check(id, sc.Entity)
+		case ast.ScopeTypeIn:
+			check(id, sc.Entity)
+		case ast.ScopeTypeInSet:
+			for _, e := range sc.Entities {
+				check(id, e)
+			}
+		}
+		// An Action entity inside a when or unless body, such as
+		// `unless { action in Action::"delte-all" }`, is checked the same way.
+		for _, c := range p.AST().Conditions {
+			ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
+				if v, ok := n.(ast.NodeValue); ok {
+					switch val := v.Value.(type) {
+					case types.EntityUID:
+						check(id, val)
+					case types.Set:
+						for e := range val.All() {
+							if uid, ok := e.(types.EntityUID); ok {
+								check(id, uid)
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return fmt.Errorf("%s; use a shipped group, a name from config actionGroups, or one RPC as \"<Service>/<Method>\"",
+		strings.Join(bad, "; "))
 }
 
 // rejectLegacyPrincipalScopes refuses a policy whose principal scope is

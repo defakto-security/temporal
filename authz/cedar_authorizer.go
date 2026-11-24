@@ -10,6 +10,7 @@ import (
 
 	cedar "github.com/cedar-policy/cedar-go"
 	"github.com/cedar-policy/cedar-go/types"
+	"github.com/cedar-policy/cedar-go/x/exp/ast"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/log"
@@ -43,6 +44,10 @@ type CedarAuthorizer struct {
 	// observeIdentity allows a call that fails the pre-policy identity checks
 	// and reports it as would_deny instead.
 	observeIdentity bool
+
+	// groups is the action group hierarchy: shipped groups plus the customer's
+	// config actionGroups. Read-only after construction.
+	groups *actionGroups
 
 	// namespaces bounds the metric namespace tag; see namespaceTag.
 	nsMu       sync.Mutex
@@ -92,11 +97,16 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 	if err != nil {
 		return nil, err
 	}
-	ps, err := newPolicySource(cfg.PolicyPath, logger)
+	groups, err := newActionGroups(cfg.ActionGroups)
+	if err != nil {
+		return nil, err
+	}
+	ps, err := newPolicySource(cfg.PolicyPath, groups, logger)
 	if err != nil {
 		return nil, err
 	}
 	a := &CedarAuthorizer{
+		groups:      groups,
 		policies:    ps,
 		attrs:       newAttributeRules(rules),
 		logger:      logger,
@@ -108,10 +118,10 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 	}
 	if a.observeIdentity {
 		logger.Warn("identityMode=observe: calls without a valid identity are ALLOWED and only reported; " +
-			"forbidden-all, break-glass, namespace-admin, cluster-admin and unclassified APIs stay denied")
+			"admin, delete and unclassified APIs stay denied")
 	}
 	if cfg.ShadowPolicyPath != "" {
-		sh, err := newPolicySource(cfg.ShadowPolicyPath, logger)
+		sh, err := newPolicySource(cfg.ShadowPolicyPath, groups, logger)
 		if err != nil {
 			_ = ps.Close()
 			return nil, fmt.Errorf("shadow policy: %w", err)
@@ -164,10 +174,9 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 	// Identity observe mode: a call that failed a pre-policy identity check is
 	// let through and reported, so callers without a valid identity can be
 	// found before enforcement is turned on.
-	// Even then, the verbs the reference policy forbids for everyone
-	// (forbidden-all, break-glass, namespace-admin, cluster-admin) stay denied, so a caller never gains those
-	// by dropping its credential.
-	if a.observeIdentity && d.identityFailure && !alwaysDenied(VerbClassOf(target.APIName)) {
+	// Even then, the admin and delete groups, and any RPC the image has no group
+	// for, stay denied, so a caller never gains those by dropping its credential.
+	if a.observeIdentity && d.identityFailure && !alwaysDenied(LeafGroup(target.APIName)) {
 		d.forgiven = true
 		d.decision = decisionAllow
 		res = authorization.Result{Decision: authorization.DecisionAllow}
@@ -178,10 +187,10 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 	return res, nil
 }
 
-// alwaysDenied reports verb classes that observe mode never forgives.
-func alwaysDenied(v VerbClass) bool {
-	return v == VerbForbiddenAll || v == VerbBreakGlass || v == VerbUnknown ||
-		v == VerbNamespaceAdmin || v == VerbClusterAdmin
+// alwaysDenied reports leaf groups that observe mode never forgives. An RPC
+// with no shipped group ("") is never forgiven.
+func alwaysDenied(leaf string) bool {
+	return leaf == "" || neverForgiven[leaf]
 }
 
 // deny builds a denial Result carrying reason.
@@ -219,20 +228,19 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 	}
 	d.attributes = attributesOf(entities, principal)
 
-	verb := VerbClassOf(target.APIName)
-	if verb == VerbUnknown {
-		return d.fail(reasonUnknownVerb, "unknown verb class: "+target.APIName, false)
-	}
-	d.verb = string(verb)
-
+	// The action is the RPC itself. Its shipped group and any customer groups
+	// are its parents, so a policy can permit the RPC by name or by group. An
+	// RPC with no shipped group is denied unless a permit names it.
+	d.verb = LeafGroup(target.APIName)
+	action := a.groups.addActionEntities(entities, target.APIName)
 	req := cedar.Request{
 		Principal: principal,
-		Action:    cedar.NewEntityUID(actionAccess, types.String(verb)),
+		Action:    action,
 		Resource:  cedar.NewEntityUID(entityNamespace, types.String(target.Namespace)),
 	}
 	d.req, d.entities = &req, entities
 
-	allowed, evalErr := a.evaluate(ps, entities, req)
+	allowed, evalErr := a.evaluate(ps, entities, req, d.verb == "")
 	switch {
 	case evalErr != "":
 		a.logger.Error("cedar policy evaluation error; denying",
@@ -242,6 +250,9 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 	case allowed:
 		return authorization.Result{Decision: authorization.DecisionAllow}
 	}
+	if d.verb == "" {
+		return d.fail(reasonUnknownVerb, "unclassified API: "+target.APIName, false)
+	}
 	return d.fail(reasonDeniedByPolicy, "denied by policy", false)
 }
 
@@ -250,12 +261,70 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 // attribute), so a broader permit could win where a deny was intended. Any
 // evaluation error is therefore reported to the caller, which fails closed;
 // it is never silently ignored.
-func (a *CedarAuthorizer) evaluate(ps *cedar.PolicySet, entities types.EntityMap, req cedar.Request) (allowed bool, evalErr string) {
+//
+// An ungrouped RPC (one the image has no shipped group for) is allowed only when
+// a permit names it: `action == Action::"<Service>/<Method>"`, or a group the
+// action belongs to, which can only be a customer group. A permit with no action
+// scope, or one that lists only shipped groups, never reaches it. This keeps a
+// new upstream RPC closed until someone decides on it. Forbids still win first.
+func (a *CedarAuthorizer) evaluate(ps *cedar.PolicySet, entities types.EntityMap, req cedar.Request, ungrouped bool) (allowed bool, evalErr string) {
 	decision, diag := cedar.Authorize(ps, entities, req)
 	if len(diag.Errors) > 0 {
 		return false, fmt.Sprintf("%v", diag.Errors)
 	}
-	return decision == cedar.Allow, ""
+	if decision != cedar.Allow {
+		return false, ""
+	}
+	if ungrouped && !anyPermitNamesAction(ps, diag.Reasons, entities, req.Action) {
+		return false, ""
+	}
+	return true, ""
+}
+
+// anyPermitNamesAction reports whether one of the permits that allowed the
+// request has an action scope that names the action or a group above it.
+func anyPermitNamesAction(ps *cedar.PolicySet, reasons []cedar.DiagnosticReason, entities types.EntityMap, action types.EntityUID) bool {
+	above := map[types.EntityUID]bool{action: true}
+	queue := []types.EntityUID{action}
+	for len(queue) > 0 {
+		e, ok := entities[queue[0]]
+		queue = queue[1:]
+		if !ok {
+			continue
+		}
+		for p := range e.Parents.All() {
+			if !above[p] {
+				above[p] = true
+				queue = append(queue, p)
+			}
+		}
+	}
+	allowing := make(map[cedar.PolicyID]bool, len(reasons))
+	for _, r := range reasons {
+		allowing[r.PolicyID] = true
+	}
+	for id, p := range ps.All() {
+		if !allowing[id] {
+			continue
+		}
+		switch sc := p.AST().Action.(type) {
+		case ast.ScopeTypeEq:
+			if above[sc.Entity] {
+				return true
+			}
+		case ast.ScopeTypeIn:
+			if above[sc.Entity] {
+				return true
+			}
+		case ast.ScopeTypeInSet:
+			for _, e := range sc.Entities {
+				if above[e] {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // runShadow evaluates the candidate policy for every call that reached policy
@@ -272,7 +341,7 @@ func (a *CedarAuthorizer) runShadow(d *decisionRecord, liveAllowed bool) {
 		a.logger.Error("shadow policy not loaded; skipping", tag.NewStringTag("apiName", d.apiName))
 		return
 	}
-	allowed, evalErr := a.evaluate(ps, d.entities, *d.req)
+	allowed, evalErr := a.evaluate(ps, d.entities, *d.req, d.verb == "")
 	switch {
 	case evalErr != "":
 		a.logger.Error("shadow policy evaluation error; ignoring",

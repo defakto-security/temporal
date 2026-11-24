@@ -1,112 +1,117 @@
 package authz
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	operatorservice "go.temporal.io/api/operatorservice/v1"
+	workflowservice "go.temporal.io/api/workflowservice/v1"
 	adminservice "go.temporal.io/server/api/adminservice/v1"
 	"google.golang.org/grpc"
 )
 
-// TestVerbClassOf is a test helper or test case in this package.
-func TestVerbClassOf(t *testing.T) {
+func TestActionName(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "WorkflowService/QueryWorkflow", ActionName(svc+"QueryWorkflow"))
+	assert.Equal(t, "AdminService/RemoveTask", ActionName(adminSvc+"RemoveTask"))
+	assert.Equal(t, "OperatorService/DeleteNamespace",
+		ActionName("/temporal.api.operatorservice.v1.OperatorService/DeleteNamespace"))
+}
+
+func TestLeafGroup(t *testing.T) {
 	t.Parallel()
 
-	const svc = "/temporal.api.workflowservice.v1.WorkflowService/"
 	const opsvc = "/temporal.api.operatorservice.v1.OperatorService/"
 	cases := []struct {
 		api  string
-		want VerbClass
+		want string
 	}{
-		{svc + "StartWorkflowExecution", VerbStartSignal},
-		{svc + "SignalWorkflowExecution", VerbStartSignal},
-		{svc + "SignalWithStartWorkflowExecution", VerbStartSignal},
-		{svc + "QueryWorkflow", VerbStartSignal},
-		{svc + "UpdateWorkflowExecution", VerbStartSignal},
-		// PollWorkflowExecutionUpdate polls for an update's result; it is the
-		// read side of UpdateWorkflowExecution, so it must share VerbStartSignal
-		// and NOT fall through the Poll* prefix rule to VerbWorker.
-		{svc + "PollWorkflowExecutionUpdate", VerbStartSignal},
-		// Same class of bug: these Poll* RPCs are client-side result reads, not
-		// the worker task-dispatch loop, so they must not be VerbWorker.
-		{svc + "PollActivityExecution", VerbStartSignal},
-		{svc + "PollNexusOperationExecution", VerbStartSignal},
-		{svc + "ExecuteMultiOperation", VerbStartSignal},
-		{svc + "GetSystemInfo", VerbReadOnly},
-		{svc + "GetClusterInfo", VerbReadOnly},
-		{svc + "GetSearchAttributes", VerbReadOnly},
+		{svc + "StartWorkflowExecution", GroupWorkflowStart},
+		{svc + "SignalWithStartWorkflowExecution", GroupWorkflowStart},
+		{svc + "SignalWorkflowExecution", GroupWorkflowSignal},
+		{svc + "UpdateWorkflowExecution", GroupWorkflowSignal},
+		// The read side of an update. It must not fall to worker-ops.
+		{svc + "PollWorkflowExecutionUpdate", GroupWorkflowSignal},
+		{svc + "QueryWorkflow", GroupWorkflowQuery},
+		{svc + "PollActivityExecution", GroupActivityRead},
+		{svc + "PollNexusOperationExecution", GroupActivityRead},
 
-		{svc + "DescribeNamespace", VerbReadOnly},
-		{svc + "ListWorkflowExecutions", VerbReadOnly},
-		{svc + "CountWorkflowExecutions", VerbReadOnly},
-		{svc + "GetWorkflowExecutionHistory", VerbReadOnly},
+		{svc + "GetSystemInfo", GroupMetadataRead},
+		{svc + "GetClusterInfo", GroupMetadataRead},
+		{svc + "DescribeNamespace", GroupMetadataRead},
+		{svc + "ListWorkflowExecutions", GroupWorkflowRead},
+		{svc + "GetWorkflowExecutionHistory", GroupWorkflowRead},
 
-		{svc + "PollActivityTaskQueue", VerbWorker},
-		{svc + "PollWorkflowTaskQueue", VerbWorker},
-		{svc + "RespondActivityTaskCompleted", VerbWorker},
-		{svc + "RecordActivityTaskHeartbeat", VerbWorker},
-		{svc + "RecordWorkerHeartbeat", VerbWorker},
-		{svc + "ShutdownWorker", VerbWorker},
+		{svc + "PollActivityTaskQueue", GroupWorkerOps},
+		{svc + "RespondActivityTaskCompleted", GroupWorkerOps},
+		{svc + "RecordWorkerHeartbeat", GroupWorkerOps},
+		{svc + "ShutdownWorker", GroupWorkerOps},
 
-		{svc + "TerminateWorkflowExecution", VerbBreakGlass},
-		{svc + "RequestCancelWorkflowExecution", VerbBreakGlass},
-		{svc + "ResetWorkflowExecution", VerbBreakGlass},
+		{svc + "TerminateWorkflowExecution", GroupWorkflowAdmin},
+		{svc + "StartBatchOperation", GroupWorkflowAdmin},
+		{svc + "CreateSchedule", GroupScheduleWrite},
+		{svc + "DescribeSchedule", GroupScheduleRead},
+		{svc + "DeleteSchedule", GroupScheduleDelete},
+		{svc + "SetCurrentDeployment", GroupDeploymentAdm},
+		{svc + "GetWorkerTaskReachability", GroupDeploymentRead},
+		{svc + "RegisterNamespace", GroupNamespaceAdmin},
 
-		{svc + "DeleteWorkflowExecution", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/DeleteWorkflowExecution", VerbForbiddenAll},
-		{"/temporal.server.api.adminservice.v1.AdminService/RemoveTask", VerbClusterAdmin},
-		{"/temporal.server.api.adminservice.v1.AdminService/DescribeHistoryHost", VerbClusterAdmin},
+		{svc + "DeleteWorkflowExecution", GroupWorkflowDelete},
+		{adminSvc + "DeleteWorkflowExecution", GroupWorkflowDelete},
+		{adminSvc + "RemoveTask", GroupClusterAdmin},
+		// AdminService and OperatorService are resolved by service, so a name
+		// they share with WorkflowService never inherits a WorkflowService group.
+		{adminSvc + "GetSearchAttributes", GroupClusterAdmin},
+		{adminSvc + "DescribeMutableState", GroupClusterAdmin},
+		{opsvc + "ListClusters", GroupClusterAdmin},
+		{opsvc + "DeleteNamespace", GroupClusterAdmin},
+		{opsvc + "SomeFutureOperatorRPC", GroupClusterAdmin},
 
-		// AdminService RPCs are forbidden by service, NOT classified by the
-		// bare-name prefix rules. DescribeMutableState shares a name shape with
-		// WorkflowService reads but must never be treated as read-only.
-		{"/temporal.server.api.adminservice.v1.AdminService/DescribeMutableState", VerbClusterAdmin},
-		{"/temporal.server.api.adminservice.v1.AdminService/GetWorkflowExecutionRawHistory", VerbClusterAdmin},
-		{"/temporal.server.api.adminservice.v1.AdminService/ListClusters", VerbClusterAdmin},
-		{"/temporal.server.api.adminservice.v1.AdminService/AddSearchAttributes", VerbClusterAdmin},
-
-		// Service is resolved BEFORE the exact-name table: an admin method that
-		// shares a name with a WorkflowService entry (GetSearchAttributes) must
-		// NOT inherit the benign read-only class.
-		{"/temporal.server.api.adminservice.v1.AdminService/GetSearchAttributes", VerbClusterAdmin},
-
-		// OperatorService is an operator surface too. Its List*/Describe* names
-		// would otherwise hit the WorkflowService prefix rules and become
-		// read-only (reachable by humans); classify by service instead.
-		{opsvc + "ListClusters", VerbClusterAdmin},
-		{opsvc + "ListSearchAttributes", VerbClusterAdmin},
-		{opsvc + "DeleteNamespace", VerbClusterAdmin},
-		{opsvc + "AddSearchAttributes", VerbClusterAdmin},
-		{opsvc + "RemoveSearchAttributes", VerbClusterAdmin},
-		// An unlisted operator method is cluster-admin, not read-only.
-		{opsvc + "SomeFutureOperatorRPC", VerbClusterAdmin},
-
-		// Namespace lifecycle is namespace-admin.
-		{svc + "RegisterNamespace", VerbNamespaceAdmin},
-		{svc + "UpdateNamespace", VerbNamespaceAdmin},
-		{svc + "DeprecateNamespace", VerbNamespaceAdmin},
-
-		// A GetXxx without History is not read-only by the prefix rule.
-		{svc + "GetWorkerTaskReachability", VerbUnknown},
-		{svc + "SomeBrandNewRPC", VerbUnknown},
+		// Unknown RPCs have no group. Only a permit that names one allows it.
+		{svc + "SomeBrandNewRPC", ""},
+		// The Poll prefix no longer maps to worker-ops.
+		{svc + "PollSomethingNew", ""},
+		{"/other.Service/StartWorkflowExecution", ""},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.api, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, VerbClassOf(tc.api))
+			assert.Equal(t, tc.want, LeafGroup(tc.api))
 		})
 	}
 }
 
-// TestOperatorAndAdminSurfaceClassified walks the generated gRPC service
-// descriptors for the pinned Temporal api/server versions and checks every
-// OperatorService and AdminService method (unary and streaming): its class is
-// the adminVerbClass entry when there is one, else VerbClusterAdmin. This is the
-// tripwire against a newly added operator or admin RPC reaching a WorkflowService
-// prefix rule (which would make a List* or Describe* RPC human-readable).
+// TestWorkflowServiceClassified walks the generated WorkflowService descriptor
+// for the pinned Temporal API version. Every method must be in exactly one leaf
+// group, and every table entry must be a real method. This is the tripwire for
+// a renovate bump that adds an RPC: it fails until the RPC is classified.
+func TestWorkflowServiceClassified(t *testing.T) {
+	t.Parallel()
+	have := make(map[string]bool)
+	d := workflowservice.WorkflowService_ServiceDesc
+	for _, m := range d.Methods {
+		have[m.MethodName] = true
+	}
+	for _, s := range d.Streams {
+		have[s.StreamName] = true
+	}
+	for name := range have {
+		require.NotEmpty(t, LeafGroup("/"+d.ServiceName+"/"+name), "%s has no shipped group; add it to leafMembers", name)
+	}
+	for leaf, members := range leafMembers {
+		for _, m := range members {
+			require.True(t, have[m], "%s lists %s, which WorkflowService does not have", leaf, m)
+		}
+	}
+}
+
+// TestOperatorAndAdminSurfaceClassified checks every OperatorService and
+// AdminService method: its group is the adminServiceLeaf entry when there is
+// one, else cluster-admin. A new operator or admin RPC joins the cluster-admin
+// floor with no table change.
 func TestOperatorAndAdminSurfaceClassified(t *testing.T) {
 	t.Parallel()
 
@@ -114,9 +119,7 @@ func TestOperatorAndAdminSurfaceClassified(t *testing.T) {
 		operatorservice.OperatorService_ServiceDesc,
 		adminservice.AdminService_ServiceDesc,
 	}
-
 	for _, d := range descs {
-		svc := d.ServiceName
 		names := make([]string, 0, len(d.Methods)+len(d.Streams))
 		for _, m := range d.Methods {
 			names = append(names, m.MethodName)
@@ -125,11 +128,75 @@ func TestOperatorAndAdminSurfaceClassified(t *testing.T) {
 			names = append(names, s.StreamName)
 		}
 		for _, name := range names {
-			want := VerbClusterAdmin
-			if c, ok := adminVerbClass[name]; ok {
-				want = c
+			want := GroupClusterAdmin
+			if g, ok := adminServiceLeaf[name]; ok {
+				want = g
 			}
-			require.Equal(t, want, VerbClassOf("/"+svc+"/"+name), "%s/%s", svc, name)
+			require.Equal(t, want, LeafGroup("/"+d.ServiceName+"/"+name), "%s/%s", d.ServiceName, name)
 		}
 	}
+}
+
+// Every aggregate member exists, no aggregate holds an admin or delete leaf,
+// and the Cedar schema lists every shipped group.
+func TestShippedGroupsConsistent(t *testing.T) {
+	t.Parallel()
+	for agg, members := range shippedAggregates {
+		for _, m := range members {
+			require.True(t, isShippedGroup(m), "%s holds unknown group %s", agg, m)
+			if agg != "delete-all" {
+				require.False(t, neverForgiven[m], "%s must not hold %s", agg, m)
+			}
+		}
+	}
+	schema, err := os.ReadFile("../schema/temporal.cedarschema")
+	require.NoError(t, err)
+	for _, g := range shippedGroupNames() {
+		require.Contains(t, string(schema), `action "`+g+`"`, "schema is missing group %s", g)
+	}
+	_, err = newActionGroups(nil)
+	require.NoError(t, err)
+}
+
+// TestDeleteRPCsAreReviewed is the guard for delete-all, which covers data and
+// audit trail deletion only. Cluster management deletes (deployments, rules) sit
+// in admin groups on purpose and are listed below. A WorkflowService RPC
+// whose name starts with Delete must be in a delete leaf, or be listed in
+// reviewedDeletes with the admin group it was put in on purpose. A new Delete*
+// RPC fails here until someone decides which it is.
+func TestDeleteRPCsAreReviewed(t *testing.T) {
+	t.Parallel()
+	reviewedDeletes := map[string]string{
+		"DeleteWorkerDeployment":        GroupDeploymentAdm,
+		"DeleteWorkerDeploymentVersion": GroupDeploymentAdm,
+		"DeleteWorkflowRule":            "namespace-admin",
+	}
+	d := workflowservice.WorkflowService_ServiceDesc
+	for _, m := range d.Methods {
+		if !strings.HasPrefix(m.MethodName, "Delete") {
+			continue
+		}
+		got := LeafGroup("/" + d.ServiceName + "/" + m.MethodName)
+		if want, ok := reviewedDeletes[m.MethodName]; ok {
+			require.Equal(t, want, got, "%s moved groups; review it against delete-all", m.MethodName)
+			continue
+		}
+		require.Contains(t, []string{GroupWorkflowDelete, GroupScheduleDelete, GroupActivityDelete}, got,
+			"%s is a new Delete RPC in %q; put it in a delete group, or list it in reviewedDeletes", m.MethodName, got)
+	}
+}
+
+// A service of another package with a known short name gets no group.
+func TestLeafGroupNeedsFullServiceName(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, GroupWorkflowStart, LeafGroup("/temporal.api.workflowservice.v1.WorkflowService/StartWorkflowExecution"))
+	for _, api := range []string{
+		"/other.WorkflowService/StartWorkflowExecution",
+		"/temporal.api.workflowservice.v2.WorkflowService/StartWorkflowExecution",
+		"/evil.adminservice.AdminService/DeleteNamespace",
+		"/x.operatorservice.Y/AddSearchAttributes",
+	} {
+		require.Empty(t, LeafGroup(api), api)
+	}
+	require.Equal(t, GroupClusterAdmin, LeafGroup("/temporal.api.operatorservice.v1.OperatorService/DeleteNamespace"))
 }
