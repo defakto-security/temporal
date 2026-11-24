@@ -180,11 +180,24 @@ func TestPolicyWithUnknownActionGroupRefused(t *testing.T) {
 		_, err := groupsAuthorizer(t, pol, nil)
 		require.ErrorContains(t, err, "unknown action group", name)
 	}
+	// An unknown group inside a condition is refused too.
+	for name, pol := range map[string]string{
+		"unless": `forbid (principal, action, resource) unless { action in Action::"delte-all" };`,
+		"when":   `forbid (principal, action, resource) when { action in Action::"delte-all" && principal.ns == "x" };`,
+		"set":    `forbid (principal, action, resource) when { action in [Action::"read-all", Action::"nope"] };`,
+		"equals": `forbid (principal, action, resource) when { action == Action::"nope" };`,
+	} {
+		_, err := groupsAuthorizer(t, pol, nil)
+		require.ErrorContains(t, err, "unknown action group", name)
+	}
+	_, err := groupsAuthorizer(t, `forbid (principal, action, resource) when { action in Action::"delete-all" || action == Action::"WorkflowService/NewRPC" };`, nil)
+	require.NoError(t, err)
+
 	// A customer group, a shipped group and a single RPC all load.
 	pol := `permit (principal in RoleClass::"service", action in Action::"mine", resource)` + scope + `;
 permit (principal in RoleClass::"service", action == Action::"WorkflowService/NewRPC", resource)` + scope + `;
 forbid (principal, action in Action::"delete-all", resource);`
-	_, err := groupsAuthorizer(t, pol, map[string][]string{"mine": {"workflow-read"}})
+	_, err = groupsAuthorizer(t, pol, map[string][]string{"mine": {"workflow-read"}})
 	require.NoError(t, err)
 }
 

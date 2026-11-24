@@ -95,13 +95,14 @@ decision = f(identity, namespace, action)
   `forbidden-all` becomes `delete-all`. A permit that names no `action` (or
   uses an `action` wildcard) grants every RPC that has a shipped group, including
   the admin groups. It never grants an RPC with no group: only a permit that
-  names that RPC, or a customer group holding it, does. and the `delete-all` floor stops only data deletion; the admin
-  groups are stopped by granting them to no one. Give every permit an `action in [...]` list. Or add a forbid
-  that excepts the admin tooling workload, because a forbid beats every
-  permit, including the admin one:
-  `forbid (principal, action in [Action::"namespace-admin", Action::"cluster-admin"], resource) unless { principal == Workload::"<admin tooling SPIFFE ID>" };`
-  then permit that workload by exact ID. The shipped policy grants neither
-  group. `DeleteWorkflowExecution` on both services is in `workflow-delete`,
+  names that RPC, or a customer group holding it, does. The `delete-all` floor
+  stops only data deletion. It does not stop deployment, version, rule or
+  namespace deletes, which sit in the admin groups. Give every permit an
+  `action in [...]` list. Or add a forbid that excepts the admin tooling
+  workload, because a forbid beats every permit, including the admin one:
+  `forbid (principal, action in [Action::"namespace-admin", Action::"deployment-admin", Action::"activity-admin", Action::"cluster-admin"], resource) unless { principal == Workload::"<admin tooling SPIFFE ID>" };`
+  then permit that workload by exact ID. The shipped policy grants none of these
+  groups. `DeleteWorkflowExecution` on both services is in `workflow-delete`,
   so it stays forbidden.
 - Temporal's own services (worker, scheduler) carry no JWT-SVID. Set
   `clientCertAuth: true` to identify them by their X.509-SVID client cert

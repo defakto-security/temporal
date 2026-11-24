@@ -127,7 +127,8 @@ func isPrincipalVar(n ast.IsNode) bool {
 // that is neither shipped nor in config actionGroups. A misspelled group, such as
 // "delte-all" in a forbid, would match nothing and silently stop forbidding.
 // A name with a "/" is one RPC, which a policy may name even when the image does
-// not know it yet, so it is not checked.
+// not know it yet, so it is not checked. The action scope and every when or
+// unless body are both checked.
 func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
 	if g == nil {
 		return nil
@@ -149,6 +150,25 @@ func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
 			for _, e := range sc.Entities {
 				check(id, e)
 			}
+		}
+		// An Action entity inside a when or unless body, such as
+		// `unless { action in Action::"delte-all" }`, is checked the same way.
+		for _, c := range p.AST().Conditions {
+			ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
+				if v, ok := n.(ast.NodeValue); ok {
+					switch val := v.Value.(type) {
+					case types.EntityUID:
+						check(id, val)
+					case types.Set:
+						for e := range val.All() {
+							if uid, ok := e.(types.EntityUID); ok {
+								check(id, uid)
+							}
+						}
+					}
+				}
+				return true
+			})
 		}
 	}
 	if len(bad) == 0 {
