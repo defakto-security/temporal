@@ -32,13 +32,13 @@ decision = f(identity, namespace, action)
 | `workflow-signal` | Signal, Update, PollWorkflowExecutionUpdate |
 | `workflow-admin` | Terminate, RequestCancel, Reset, Pause, Unpause, UpdateOptions, batch ops |
 | `workflow-delete` | `DeleteWorkflowExecution` (both services) |
-| `metadata-read` | System, cluster and search attribute info, namespaces, task queues, workers, batch and rule reads |
+| `metadata-read` | System, cluster and search attribute info, namespaces, task queues, workers, batch and rule reads, and the OperatorService reads (`ListSearchAttributes`, `ListClusters`, `ListNexusEndpoints`, `GetNexusEndpoint`) |
 | `schedule-read` · `schedule-write` · `schedule-delete` | Schedule RPCs |
 | `activity-read` · `activity-write` · `activity-admin` · `activity-delete` | Standalone activity and Nexus operation RPCs |
 | `worker-ops` | Poll, Respond, heartbeat, ShutdownWorker, sticky reset, worker config update |
 | `deployment-read` · `deployment-admin` | Worker deployment, versioning and task queue config |
 | `namespace-admin` | Register, Update, Deprecate namespace, workflow rules |
-| `cluster-admin` | Every AdminService and OperatorService method, except the delete |
+| `cluster-admin` | Every AdminService method and every OperatorService method except the four reads above and the workflow delete |
 
 | Shipped aggregate | Holds |
 |---|---|

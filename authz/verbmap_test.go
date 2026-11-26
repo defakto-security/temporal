@@ -66,7 +66,14 @@ func TestLeafGroup(t *testing.T) {
 		// they share with WorkflowService never inherits a WorkflowService group.
 		{adminSvc + "GetSearchAttributes", GroupClusterAdmin},
 		{adminSvc + "DescribeMutableState", GroupClusterAdmin},
-		{opsvc + "ListClusters", GroupClusterAdmin},
+		{opsvc + "ListClusters", GroupMetadataRead},
+		{opsvc + "ListSearchAttributes", GroupMetadataRead},
+		{opsvc + "ListNexusEndpoints", GroupMetadataRead},
+		{opsvc + "GetNexusEndpoint", GroupMetadataRead},
+		{opsvc + "CreateNexusEndpoint", GroupClusterAdmin},
+		{opsvc + "AddSearchAttributes", GroupClusterAdmin},
+		// The read list is OperatorService only. AdminService keeps every method.
+		{adminSvc + "ListClusters", GroupClusterAdmin},
 		{opsvc + "DeleteNamespace", GroupClusterAdmin},
 		{opsvc + "SomeFutureOperatorRPC", GroupClusterAdmin},
 
@@ -119,6 +126,7 @@ func TestOperatorAndAdminSurfaceClassified(t *testing.T) {
 		operatorservice.OperatorService_ServiceDesc,
 		adminservice.AdminService_ServiceDesc,
 	}
+	seenReads := map[string]bool{}
 	for _, d := range descs {
 		names := make([]string, 0, len(d.Methods)+len(d.Streams))
 		for _, m := range d.Methods {
@@ -132,8 +140,17 @@ func TestOperatorAndAdminSurfaceClassified(t *testing.T) {
 			if g, ok := adminServiceLeaf[name]; ok {
 				want = g
 			}
+			if d.ServiceName == operatorServiceFull && operatorServiceReads[name] {
+				want = GroupMetadataRead
+				seenReads[name] = true
+			}
 			require.Equal(t, want, LeafGroup("/"+d.ServiceName+"/"+name), "%s/%s", d.ServiceName, name)
 		}
+	}
+	// A read listed in operatorServiceReads must exist upstream, so a rename
+	// cannot leave a dead entry that quietly returns the read to cluster-admin.
+	for name := range operatorServiceReads {
+		require.True(t, seenReads[name], "operatorServiceReads names a method OperatorService lacks: %s", name)
 	}
 }
 

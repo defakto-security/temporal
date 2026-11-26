@@ -168,6 +168,15 @@ var adminServiceLeaf = map[string]string{
 	"DeleteWorkflowExecution": GroupWorkflowDelete,
 }
 
+// operatorServiceReads are the OperatorService methods that only read. They
+// are metadata-read, so read-all and workflow-client holders (the Web UI) get
+// them without cluster-admin. Every other OperatorService method stays
+// cluster-admin, so a new upstream method joins the floor at once.
+var operatorServiceReads = map[string]bool{
+	"ListSearchAttributes": true, "ListClusters": true,
+	"GetNexusEndpoint": true, "ListNexusEndpoints": true,
+}
+
 // neverForgiven are the leaf groups observe mode never forgives: a caller must
 // not gain these by dropping its credential. An RPC with no shipped group is
 // never forgiven either.
@@ -259,6 +268,9 @@ func LeafGroup(apiName string) string {
 	}
 	switch svc {
 	case operatorServiceFull, adminServiceFull:
+		if svc == operatorServiceFull && operatorServiceReads[method] {
+			return GroupMetadataRead
+		}
 		// Every other method on these services is cluster-admin.
 		if g, ok := adminServiceLeaf[method]; ok {
 			return g
