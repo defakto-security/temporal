@@ -22,6 +22,13 @@ COPY build/$TARGETOS/$TARGETARCH/server /usr/local/sbin/defakto-spiffe-temporal
 # The module reads its own config from the path the customer's ConfigMap mounts.
 ENV DEFAKTO_SPIFFE_TEMPORAL_CONFIG=/etc/defakto-spiffe-temporal/config.yaml
 
+# Same working directory as the stock Temporal image, so relative paths (for
+# example TEMPORAL_CONFIG_DIR=config -> /etc/temporal/config) resolve as they
+# do there. The stock env vars (TEMPORAL_SERVER_CONFIG_FILE_PATH,
+# TEMPORAL_CONFIG_DIR, TEMPORAL_ENVIRONMENT, TEMPORAL_AVAILABILITY_ZONE)
+# behave as in the stock image. Use absolute paths in the module config.
+WORKDIR /etc/temporal
+
 # Run as a non-root UID. ubuntu:24.04 ships the 'ubuntu' user at UID 1000; the
 # mounted ConfigMap (config + Cedar policy) is world-readable, so this UID can
 # read it.
