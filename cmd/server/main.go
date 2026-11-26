@@ -67,7 +67,18 @@ func main() {
 
 // run starts the Temporal server with the Cedar authorizer.
 func run() error {
-	logger := log.NewZapLogger(log.BuildZapLogger(log.Config{}))
+	// Load Temporal's own config once, as the stock server does, and use that
+	// one result for the logger, metrics handler, RDS IAM and the server.
+	// Like the stock entrypoint, a host name that does not resolve is not
+	// fatal: BIND_ON_IP stays unset and a config that needs it fails on its own.
+	if err := setBindEnvFromHost(); err != nil {
+		stdlog.Printf("defakto-spiffe-temporal: warning: %v", err)
+	}
+	tcfg, err := loadTemporalConfig(os.LookupEnv)
+	if err != nil {
+		return fmt.Errorf("loading temporal config: %w", err)
+	}
+	logger := log.NewZapLogger(log.BuildZapLogger(tcfg.Log))
 
 	// Our own config contract (trust domain, issuer/aud/JWKS, DevID template,
 	// policy path), read from the path the customer's ConfigMap mounts.
@@ -121,7 +132,7 @@ func run() error {
 	// authorizer is constructed, so the authorizer cannot borrow it. Build it
 	// here, the same way the server would, and hand the one instance to both:
 	// decision counters then appear on the server's own metrics endpoint.
-	metricsHandler, err := temporalMetricsHandler(logger)
+	metricsHandler, err := metrics.MetricsHandlerFromConfig(logger, tcfg.Global.Metrics)
 	if err != nil {
 		return err
 	}
@@ -130,14 +141,12 @@ func run() error {
 
 	// Optional RDS IAM auth: load Temporal's config here so we can hook the
 	// SQL stores, then hand the result to the server.
-	var iamOpts []temporal.ServerOption
 	if appCfg.DatabaseIAM.Enabled {
-		mgr, tcfg, err := setupDatabaseIAM(appCfg.DatabaseIAM, logger)
+		mgr, err := setupDatabaseIAM(appCfg.DatabaseIAM, tcfg, logger)
 		if err != nil {
 			return err
 		}
 		defer mgr.Close()
-		iamOpts = append(iamOpts, temporal.WithConfig(tcfg))
 	}
 
 	opts := []temporal.ServerOption{
@@ -146,11 +155,7 @@ func run() error {
 		// matching/worker and silently idle. Honor TEMPORAL_SERVICES as the
 		// stock image does, defaulting to the full set.
 		temporal.ForServices(servicesToStart()),
-		temporal.WithConfigLoader(
-			temporalConfigDir(),
-			os.Getenv(config.EnvKeyEnvironment),
-			os.Getenv(config.EnvKeyAvailabilityZone),
-		),
+		temporal.WithConfig(tcfg),
 		temporal.WithLogger(logger),
 		temporal.WithCustomMetricsHandler(metricsHandler),
 		temporal.WithAuthorizer(authorizer),
@@ -158,7 +163,7 @@ func run() error {
 			return claimMapper
 		}),
 	}
-	s, err := temporal.NewServer(append(opts, iamOpts...)...)
+	s, err := temporal.NewServer(opts...)
 	if err != nil {
 		return err
 	}
@@ -170,29 +175,15 @@ func run() error {
 	return s.Stop()
 }
 
-// temporalMetricsHandler builds the metrics handler from Temporal's own config
-// (global.metrics), exactly as the server does when none is supplied.
-func temporalMetricsHandler(logger log.Logger) (metrics.Handler, error) {
-	cfg, err := config.Load(
-		config.WithConfigDir(temporalConfigDir()),
-		config.WithEnv(os.Getenv(config.EnvKeyEnvironment)),
-		config.WithZone(os.Getenv(config.EnvKeyAvailabilityZone)),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("loading temporal config for metrics: %w", err)
-	}
-	return metrics.MetricsHandlerFromConfig(logger, cfg.Global.Metrics)
-}
-
-// setupDatabaseIAM loads Temporal's config and points every SQL store at the
-// cached RDS IAM token. The caller must Close the returned Manager.
-func setupDatabaseIAM(iam spiffeconfig.DatabaseIAMConfig, logger log.Logger) (*dbauth.Manager, *config.Config, error) {
+// setupDatabaseIAM points every SQL store in tcfg at the cached RDS IAM token.
+// The caller must Close the returned Manager.
+func setupDatabaseIAM(iam spiffeconfig.DatabaseIAMConfig, tcfg *config.Config, logger log.Logger) (*dbauth.Manager, error) {
 	region := iam.Region
 	if region == "" {
 		region = os.Getenv("AWS_REGION")
 	}
 	if region == "" {
-		return nil, nil, errors.New("databaseIAM: region is unset and AWS_REGION is empty")
+		return nil, errors.New("databaseIAM: region is unset and AWS_REGION is empty")
 	}
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
 		awsconfig.WithRegion(region),
@@ -203,32 +194,16 @@ func setupDatabaseIAM(iam spiffeconfig.DatabaseIAMConfig, logger log.Logger) (*d
 		}),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("databaseIAM: loading AWS config: %w", err)
-	}
-	tcfg, err := config.Load(
-		config.WithConfigDir(temporalConfigDir()),
-		config.WithEnv(os.Getenv(config.EnvKeyEnvironment)),
-		config.WithZone(os.Getenv(config.EnvKeyAvailabilityZone)),
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databaseIAM: loading Temporal config: %w", err)
+		return nil, fmt.Errorf("databaseIAM: loading AWS config: %w", err)
 	}
 	mgr := dbauth.NewManager(region, awsCfg.Credentials, iam.RefreshInterval, func(err error) {
 		logger.Error("RDS IAM token refresh failed; keeping the previous token", tag.Error(err))
 	})
 	if err := mgr.Apply(tcfg); err != nil {
 		mgr.Close()
-		return nil, nil, fmt.Errorf("databaseIAM: %w", err)
+		return nil, fmt.Errorf("databaseIAM: %w", err)
 	}
-	return mgr, tcfg, nil
-}
-
-// temporalConfigDir returns the Temporal config directory.
-func temporalConfigDir() string {
-	if dir := os.Getenv(config.EnvKeyConfigDir); dir != "" {
-		return dir
-	}
-	return "config"
+	return mgr, nil
 }
 
 // takesClientCalls reports whether any named service accepts client calls, and

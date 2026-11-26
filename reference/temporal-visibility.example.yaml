@@ -4,8 +4,13 @@
 #
 # This is Temporal's own config (the persistence block), not the module config.
 # Temporal reads base.yaml, then <environment>.yaml, from TEMPORAL_CONFIG_DIR
-# and merges them. Merge this block into one of those files; a file with any
-# other name in that directory is ignored. The stock Helm chart cannot render
+# and merges them. As in the stock image, the directory is read only when
+# TEMPORAL_CONFIG_DIR, TEMPORAL_ENVIRONMENT or TEMPORAL_AVAILABILITY_ZONE is
+# set (a relative dir resolves from /etc/temporal). With none of them set,
+# the server uses a built-in template filled from env vars. Merge this block
+# into one of those files; a file with any other name in that directory is
+# ignored. Alternatively set TEMPORAL_SERVER_CONFIG_FILE_PATH to one complete
+# file; it cannot be combined with the directory variables. The stock Helm chart cannot render
 # these keys, so the ConfigMap that mounts the config directory carries them.
 #
 # One-time setup, run as a Job BEFORE the first server start. The image ships
