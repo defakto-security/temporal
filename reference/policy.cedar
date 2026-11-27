@@ -14,7 +14,8 @@
 //               Any trust domain the SPIFFE agent holds a bundle for (including
 //               federated ones) can authenticate, so EVERY PERMIT MUST SCOPE
 //               principal.trust_domain, as below (or name one exact Workload).
-//               A permit that does not is rejected at load. IDs not in
+//               A permit that does not is rejected at load. So is a permit
+//               with no action scope: name the groups it grants. IDs not in
 //               canonical form are denied.
 //               A policy that still scopes the
 //               principal with `== RoleClass::"x"` is rejected at load.

@@ -46,9 +46,9 @@ func TestPolicyLoad_RejectsUnscopedPermit(t *testing.T) {
 func TestPolicyLoad_AcceptsScopedPolicies(t *testing.T) {
 	t.Parallel()
 	for _, pol := range []string{
-		`permit (principal in RoleClass::"service", action, resource) when { principal.trust_domain == "corp.defakto.security" };`,
-		`permit (principal in RoleClass::"service", action, resource) unless { principal.trust_domain != "corp.defakto.security" };`,
-		`permit (principal == Workload::"spiffe://corp.defakto.security/ns/a/sa/b", action, resource);`,
+		`permit (principal in RoleClass::"service", action in Action::"read-all", resource) when { principal.trust_domain == "corp.defakto.security" };`,
+		`permit (principal in RoleClass::"service", action in Action::"read-all", resource) unless { principal.trust_domain != "corp.defakto.security" };`,
+		`permit (principal == Workload::"spiffe://corp.defakto.security/ns/a/sa/b", action in Action::"read-all", resource);`,
 		`forbid (principal, action in Action::"delete-all", resource);`,
 	} {
 		require.NoError(t, loadPolicy(t, pol), pol)

@@ -1,5 +1,5 @@
 // Package authn maps a Defakto SPIFFE identity to Temporal Claims and a derived
-// role_class. It performs authentication only — it assigns no verb grants. The
+// role_class. It performs authentication only — it grants no permissions. The
 // SVID proves who the caller is; what they may do is decided by the authorizer.
 //
 // A caller presents a JWT-SVID in the `authorization` header (Bearer). It is

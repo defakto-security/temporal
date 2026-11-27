@@ -32,7 +32,7 @@ const (
 )
 
 // CedarAuthorizer implements authorization.Authorizer by evaluating the
-// customer-owned Cedar policy over (role_class, namespace, verb_class).
+// customer-owned Cedar policy over (principal, namespace, action).
 type CedarAuthorizer struct {
 	policies *policySource
 	// shadow is the optional candidate policy. It never changes a decision.
@@ -50,7 +50,7 @@ type CedarAuthorizer struct {
 	groups *actionGroups
 
 	// namespaces bounds the metric namespace tag; see namespaceTag.
-	nsMu       sync.Mutex
+	nsMu       sync.RWMutex
 	namespaces map[string]struct{}
 }
 
@@ -101,7 +101,8 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 	if err != nil {
 		return nil, err
 	}
-	ps, err := newPolicySource(cfg.PolicyPath, groups, logger)
+	warnUnknownGroupRPCs(cfg.ActionGroups, logger)
+	ps, err := newPolicySource(cfg.PolicyPath, "live", groups, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -117,11 +118,12 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 		namespaces:      make(map[string]struct{}),
 	}
 	if a.observeIdentity {
-		logger.Warn("identityMode=observe: calls without a valid identity are ALLOWED and only reported; " +
+		logger.Warn("identityMode=observe: calls without a valid identity are ALLOWED and only reported, " +
+			"and no policy is evaluated for them, so forbid rules do not apply; " +
 			"admin, delete and unclassified APIs stay denied")
 	}
 	if cfg.ShadowPolicyPath != "" {
-		sh, err := newPolicySource(cfg.ShadowPolicyPath, groups, logger)
+		sh, err := newPolicySource(cfg.ShadowPolicyPath, "shadow", groups, logger)
 		if err != nil {
 			_ = ps.Close()
 			return nil, fmt.Errorf("shadow policy: %w", err)
@@ -138,7 +140,25 @@ func (a *CedarAuthorizer) WithMetrics(h metrics.Handler) *CedarAuthorizer {
 	// handler with service_name; this one is the untagged root, so tag it here to
 	// line up with Temporal's own authorization metrics.
 	a.metrics = h.WithTags(metrics.ServiceNameTag(primitives.FrontendService))
+	a.policies.setMetrics(a.metrics)
+	if a.shadow != nil {
+		a.shadow.setMetrics(a.metrics)
+	}
 	return a
+}
+
+// warnUnknownGroupRPCs logs each RPC a customer group names that looks like a
+// typo. A name the image does not know is allowed, since the group may name a
+// new Temporal RPC, but a misspelling would otherwise never match.
+func warnUnknownGroupRPCs(groups map[string][]string, logger log.Logger) {
+	for name, members := range groups {
+		for _, m := range members {
+			if unknownRPC(m) {
+				logger.Warn("actionGroups names an RPC this image does not know; a typo here matches nothing",
+					tag.NewStringTag("group", name), tag.NewStringTag("action", m))
+			}
+		}
+	}
 }
 
 // Close stops the policy watchers.
@@ -153,7 +173,8 @@ func (a *CedarAuthorizer) Close() error {
 }
 
 // Authorize decides a single call. It fails closed: a nil policy set (never
-// loaded cleanly), an unknown verb class, or an unknown role class all deny.
+// loaded cleanly), an unclassified RPC with no permit naming it, or an unknown
+// role class all deny.
 // The shadow policy, if any, is evaluated only after the live decision is made
 // and cannot change it.
 func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Claims, target *authorization.CallTarget) (authorization.Result, error) {
@@ -173,9 +194,13 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 
 	// Identity observe mode: a call that failed a pre-policy identity check is
 	// let through and reported, so callers without a valid identity can be
-	// found before enforcement is turned on.
-	// Even then, the admin and delete groups, and any RPC the image has no group
-	// for, stay denied, so a caller never gains those by dropping its credential.
+	// found before enforcement is turned on. That check fails before any policy
+	// runs, so no permit or forbid is evaluated for such a call: a customer
+	// forbid does not stop it. This is deliberate. Observe is the data-gathering
+	// stage of a rollout and must not block traffic, and a call with a valid
+	// identity is still decided by the policy.
+	// The admin and delete groups, and any RPC the image has no group for, stay
+	// denied, so a caller never gains those by dropping its credential.
 	if a.observeIdentity && d.identityFailure && !alwaysDenied(LeafGroup(target.APIName)) {
 		d.forgiven = true
 		d.decision = decisionAllow
@@ -231,7 +256,7 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 	// The action is the RPC itself. Its shipped group and any customer groups
 	// are its parents, so a policy can permit the RPC by name or by group. An
 	// RPC with no shipped group is denied unless a permit names it.
-	d.verb = LeafGroup(target.APIName)
+	d.group = LeafGroup(target.APIName)
 	action := a.groups.addActionEntities(entities, target.APIName)
 	req := cedar.Request{
 		Principal: principal,
@@ -240,7 +265,7 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 	}
 	d.req, d.entities = &req, entities
 
-	allowed, evalErr := a.evaluate(ps, entities, req, d.verb == "")
+	allowed, evalErr := a.evaluate(ps, entities, req, d.group == "")
 	switch {
 	case evalErr != "":
 		a.logger.Error("cedar policy evaluation error; denying",
@@ -250,7 +275,7 @@ func (a *CedarAuthorizer) decide(caller *authorization.Claims, target *authoriza
 	case allowed:
 		return authorization.Result{Decision: authorization.DecisionAllow}
 	}
-	if d.verb == "" {
+	if d.group == "" {
 		return d.fail(reasonUnknownVerb, "unclassified API: "+target.APIName, false)
 	}
 	return d.fail(reasonDeniedByPolicy, "denied by policy", false)
@@ -341,7 +366,7 @@ func (a *CedarAuthorizer) runShadow(d *decisionRecord, liveAllowed bool) {
 		a.logger.Error("shadow policy not loaded; skipping", tag.NewStringTag("apiName", d.apiName))
 		return
 	}
-	allowed, evalErr := a.evaluate(ps, d.entities, *d.req, d.verb == "")
+	allowed, evalErr := a.evaluate(ps, d.entities, *d.req, d.group == "")
 	switch {
 	case evalErr != "":
 		a.logger.Error("shadow policy evaluation error; ignoring",
@@ -381,21 +406,17 @@ func (a *CedarAuthorizer) record(d *decisionRecord) {
 // which case it is "delta"; the direction follows from decision (live allow plus
 // delta is would_deny). A call forgiven by identityMode=observe is
 // decision="allow" with the identity failure as reason. Tags are bounded:
-// decision, shadow_decision, verb class and reason are closed sets, and
+// decision, shadow_decision, group and reason are closed sets, and
 // namespace is capped (see namespaceTag).
 func (a *CedarAuthorizer) count(d *decisionRecord) {
-	verb := d.verb
-	if verb == "" {
-		verb = "none"
-	}
-	shadow := d.decision
-	if d.shadowDelta != "" {
-		shadow = shadowDelta
+	group := d.group
+	if group == "" {
+		group = "none"
 	}
 	a.metrics.Counter(metricDecisions).Record(1,
 		metrics.StringTag("decision", d.decision),
-		metrics.StringTag("shadow_decision", shadow),
-		metrics.StringTag("verb", verb),
+		metrics.StringTag("shadow_decision", d.shadowDecision()),
+		metrics.StringTag("group", group),
 		metrics.StringTag("reason", d.reasonCode()),
 		metrics.NamespaceTag(a.namespaceTag(d)))
 }
@@ -406,12 +427,22 @@ func (a *CedarAuthorizer) count(d *decisionRecord) {
 // the live policy allowed, and at most maxMetricNamespaces are tracked; every
 // other value is reported as "_other".
 func (a *CedarAuthorizer) namespaceTag(d *decisionRecord) string {
+	// Most calls hit a tracked namespace, so look it up under the read lock.
+	a.nsMu.RLock()
+	_, ok := a.namespaces[d.namespace]
+	a.nsMu.RUnlock()
+	if ok {
+		return d.namespace
+	}
+	if d.decision != decisionAllow || d.identityFailure {
+		return otherNamespace
+	}
 	a.nsMu.Lock()
 	defer a.nsMu.Unlock()
 	if _, ok := a.namespaces[d.namespace]; ok {
 		return d.namespace
 	}
-	if d.decision == decisionAllow && !d.identityFailure && len(a.namespaces) < maxMetricNamespaces {
+	if len(a.namespaces) < maxMetricNamespaces {
 		a.namespaces[d.namespace] = struct{}{}
 		return d.namespace
 	}
@@ -420,9 +451,11 @@ func (a *CedarAuthorizer) namespaceTag(d *decisionRecord) string {
 
 // decisionRecord is everything one decision log line or counter needs.
 type decisionRecord struct {
-	subject, roleClass, namespace, apiName, verb string
-	attributes                                   map[string]string
-	decision, reason                             string
+	subject, roleClass, namespace, apiName string
+	// group is the RPC's shipped leaf group, "" when the image has none.
+	group            string
+	attributes       map[string]string
+	decision, reason string
 	// code is the fixed reason code; identityFailure marks a pre-policy
 	// identity check that failed.
 	code            string
@@ -446,23 +479,28 @@ func (d *decisionRecord) fail(code, reason string, identity bool) authorization.
 // tags builds the log fields. divergence is would_deny or would_allow on a
 // divergence line and "" otherwise.
 func (d *decisionRecord) tags(divergence string) []tag.Tag {
-	shadow := d.decision
-	if d.shadowDelta != "" {
-		shadow = shadowDelta
-	}
 	return []tag.Tag{
 		tag.NewStringTag("decision", d.decision),
-		tag.NewStringTag("shadowDecision", shadow),
+		tag.NewStringTag("shadowDecision", d.shadowDecision()),
 		tag.NewStringTag("divergence", divergence),
 		tag.NewStringTag("principal", d.subject),
 		tag.NewStringTag("roleClass", d.roleClass),
 		tag.NewAnyTag("attributes", d.attributes),
 		tag.NewStringTag("namespace", d.namespace),
 		tag.NewStringTag("apiName", d.apiName),
-		tag.NewStringTag("verb", d.verb),
+		tag.NewStringTag("group", d.group),
 		tag.NewStringTag("reason", d.reason),
 		tag.NewStringTag("reasonCode", d.reasonCode()),
 	}
+}
+
+// shadowDecision is the live decision, or "delta" when the candidate policy
+// disagreed with it.
+func (d *decisionRecord) shadowDecision() string {
+	if d.shadowDelta != "" {
+		return shadowDelta
+	}
+	return d.decision
 }
 
 // reasonCode is the bounded reason label: "allowed" unless a check failed.

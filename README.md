@@ -18,7 +18,7 @@ decision = f(identity, namespace, action)
 ```
 
 - **role_class** ∈ {`service`, `human`} — derived structurally from the SPIFFE
-  identity by the claim mapper. Authentication only; no verb grants.
+  identity by the claim mapper. Authentication only; it grants no permissions.
 - **action** — one RPC, named `<Service>/<Method>`, such as
   `Action::"WorkflowService/QueryWorkflow"`. The image ships groups of RPCs
   (`authz/verbmap.go`), and a permit can name a group, a list, or one RPC.
@@ -49,12 +49,20 @@ decision = f(identity, namespace, action)
 | `read-all` | Every read group. It does not hold `workflow-query`. |
 | `delete-all` | Every group that deletes data or its audit trail: workflow, schedule and activity deletes. The shipped policy forbids it. Cluster management deletes (worker deployments and versions, workflow rules, namespaces) are in the admin groups, which are granted by name. |
 
-  No aggregate holds an admin leaf group. The only aggregate that holds delete
-  leaf groups is `delete-all`, which the shipped policy forbids. An RPC the image does not
-  know is in no group, so only a permit that names it, or a customer group
-  that holds it, allows it. A new Temporal RPC therefore needs no new image:
-  add `permit (..., action == Action::"WorkflowService/NewRpc", ...)`.
-  A test fails when an API upgrade adds an RPC the table does not list.
+No aggregate holds an admin leaf group. The only aggregate that holds delete
+leaf groups is `delete-all`, which the shipped policy forbids. An RPC the image does not
+know is in no group, so only a permit that names it, or a customer group
+that holds it, allows it. A new Temporal RPC therefore needs no new image:
+add `permit (..., action == Action::"WorkflowService/NewRpc", ...)`.
+
+A new Temporal RPC on `AdminService` or `OperatorService` joins `cluster-admin`
+at once, so the shipped forbids and the admin grants cover it. A new
+`WorkflowService` RPC has no group, so no `forbid` on a shipped group covers it
+until a permit names it, and it stays denied until then. What stops a new
+`WorkflowService` RPC from slipping in unclassified is a test, not the policy:
+`TestWorkflowServiceClassified` fails the build when an API upgrade adds an RPC
+the table does not list. The publish workflow runs it before it pushes an image.
+
 - **actionGroups** — your own bundles. A member is an RPC such as
   `WorkflowService/QueryWorkflow`, or a shipped or customer group. A group
   cannot reuse a shipped name, name a group that does not exist, or form a
@@ -72,9 +80,20 @@ decision = f(identity, namespace, action)
     when { principal.trust_domain == "corp.example" };
   ```
 - **policy** — wholly customer-owned Cedar, loaded from the mounted ConfigMap.
-  No compiled-in forbid set. The authorizer **fails closed** on an absent,
+  No compiled-in forbid set. The server **refuses to start** on an absent,
   unparseable, or invalid policy. The shipped `reference/policy.cedar` forbids
-  the destruction verbs by default.
+  the destruction verbs by default. The loader rejects a policy that
+  - has a permit that does not scope `principal.trust_domain`,
+  - has a permit with no `action` scope (it would grant every admin group),
+  - names a group that does not exist (a typo in a `forbid` would forbid nothing).
+
+  A name such as `WorkflowService/TerminateWorkflowExection` is only logged as a
+  warning, because a policy may name a new RPC before the image knows it.
+  After start, a policy file that fails to reload (a syntax error, a deleted
+  file) **leaves the previous policy live**. It does not fail closed. Watch
+  `defakto_authz_policy_reload{result="error"}` and
+  `defakto_authz_policy_loaded_timestamp_seconds`. Reloads wait 100 ms after the
+  last file event, so a half-written file is not loaded.
 
 ## Trust boundaries to know
 
@@ -85,25 +104,12 @@ decision = f(identity, namespace, action)
 - A JWT-SVID is a bearer token. Serve the frontend over TLS and give each
   cluster its own `workloadAPI.audience`. A token with more than one audience
   is refused.
-- `identityMode: observe` lets callers without a valid identity through (the
-  admin and delete groups, and RPCs with no shipped group, stay denied). It is a rollout aid.
-- **Upgrade note: actions are RPCs.** The old classes (`read-only`,
-  `start-signal`, `worker`, `break-glass`, `forbidden-all`) are gone. Rewrite
-  `action` lists with the groups above: `start-signal` becomes
-  `workflow-start` and `workflow-interact`, `worker` becomes `worker-ops`,
-  `read-only` becomes `read-all`, `break-glass` becomes `workflow-admin`, and
-  `forbidden-all` becomes `delete-all`. A permit that names no `action` (or
-  uses an `action` wildcard) grants every RPC that has a shipped group, including
-  the admin groups. It never grants an RPC with no group: only a permit that
-  names that RPC, or a customer group holding it, does. The `delete-all` floor
-  stops only data deletion. It does not stop deployment, version, rule or
-  namespace deletes, which sit in the admin groups. Give every permit an
-  `action in [...]` list. Or add a forbid that excepts the admin tooling
-  workload, because a forbid beats every permit, including the admin one:
-  `forbid (principal, action in [Action::"namespace-admin", Action::"deployment-admin", Action::"activity-admin", Action::"cluster-admin"], resource) unless { principal == Workload::"<admin tooling SPIFFE ID>" };`
-  then permit that workload by exact ID. The shipped policy grants none of these
-  groups. `DeleteWorkflowExecution` on both services is in `workflow-delete`,
-  so it stays forbidden.
+- `identityMode: observe` is a rollout aid for finding callers that send no
+  valid identity before you enforce. It lets such a call through, logs it, and
+  **does not evaluate your policy for it**, so a `forbid` does not stop it.
+  Only the admin and delete groups, and RPCs with no shipped group, stay
+  denied. A caller with a valid identity is still decided by the policy,
+  `forbid` rules included. Turn it off once every client sends an identity.
 - Temporal's own services (worker, scheduler) carry no JWT-SVID. Set
   `clientCertAuth: true` to identify them by their X.509-SVID client cert
   (URI SAN = SPIFFE ID). Any `authorization` header, even blank, wins and is
@@ -142,13 +148,50 @@ global:
   bundle file fresh (for example with spiffe-helper); a stale file rejects good
   callers. Check both listeners in observe mode before you enforce.
 
+## Upgrading from the old verb classes
+
+The old classes (`read-only`, `start-signal`, `worker`, `break-glass`,
+`forbidden-all`) are gone, and actions are RPCs. Rewrite `action` lists with the
+groups above:
+
+| Old class | Now |
+|---|---|
+| `start-signal` | `workflow-start` and `workflow-interact` |
+| `worker` | `worker-ops` |
+| `read-only` | `read-all` |
+| `break-glass` | `workflow-admin` |
+| `forbidden-all` | `delete-all` |
+
+Every permit needs an `action` scope. A permit with no `action` would grant every
+RPC that has a shipped group, the admin groups included, so the loader rejects it.
+Name the groups, as in `action in [Action::"workflow-client", Action::"worker-ops"]`.
+A permit never grants an RPC with no group. Only a permit that names that RPC,
+or a customer group holding it, does.
+
+The `delete-all` floor stops only data deletion. It does not stop deployment,
+version, rule or namespace deletes, which sit in the admin groups. The shipped
+policy grants none of those groups. If you grant an admin group to a wide
+principal, add a forbid that excepts the admin tooling workload, because a
+forbid beats every permit, including the admin one:
+
+```cedar
+forbid (principal,
+        action in [Action::"namespace-admin", Action::"deployment-admin",
+                   Action::"activity-admin", Action::"cluster-admin"],
+        resource)
+  unless { principal == Workload::"<admin tooling SPIFFE ID>" };
+```
+
+Then permit that workload by exact ID. `DeleteWorkflowExecution` on both
+services is in `workflow-delete`, so it stays forbidden.
+
 ## Layout
 
 ```
 cmd/server/main.go     custom Temporal server: registers ClaimMapper + Authorizer
-authn/                 SPIFFE SVID / portal-OIDC -> Claims + role_class (no grants)
-authz/                 Cedar authorizer, verb map, fail-closed policy source
-config/                versioned config contract (trust domain, issuer, policy path)
+authn/                 SPIFFE SVID -> Claims + role_class (no grants)
+authz/                 Cedar authorizer, RPC group table, policy source
+config/                versioned config contract (Workload API, audience, attributes, policy path)
 reference/             shipped policy.cedar + example ConfigMap + stock-chart values
 schema/                Cedar entity/action schema (CI/doc artifact)
 ```

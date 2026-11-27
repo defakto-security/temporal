@@ -2,6 +2,7 @@ package authz
 
 import (
 	"os"
+	"sort"
 	"strings"
 	"testing"
 
@@ -12,6 +13,19 @@ import (
 	adminservice "go.temporal.io/server/api/adminservice/v1"
 	"google.golang.org/grpc"
 )
+
+// shippedGroupNames is every shipped group, leaf and aggregate.
+func shippedGroupNames() []string {
+	var out []string
+	for g := range leafGroups {
+		out = append(out, g)
+	}
+	for g := range shippedAggregates {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
+}
 
 func TestActionName(t *testing.T) {
 	t.Parallel()

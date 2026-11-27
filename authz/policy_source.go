@@ -3,9 +3,11 @@ package authz
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	cedar "github.com/cedar-policy/cedar-go"
 	"github.com/cedar-policy/cedar-go/types"
@@ -13,16 +15,42 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
+	"go.temporal.io/server/common/metrics"
 
 	spiffeconfig "github.com/defakto-security/temporal/config"
 )
 
+// Metric names for policy loading.
+const (
+	metricPolicyReload   = "defakto_authz_policy_reload"
+	metricPolicyLoadedAt = "defakto_authz_policy_loaded_timestamp_seconds"
+)
+
+// reloadDebounce is how long the watcher waits after the last file event before
+// it reloads. One edit raises several events, and a write in progress can leave
+// a half-written file, so the reload waits for the writes to stop.
+const reloadDebounce = 100 * time.Millisecond
+
 // policySource loads the customer-owned Cedar policy from a file and hot-reloads
-// it on change (fsnotify). It fails closed: an absent, unparseable, or
-// schema-invalid policy leaves no usable PolicySet, and the authorizer denies.
+// it on change (fsnotify).
+//
+// At start the policy must load, or the server does not start. After that, a
+// reload that fails (a deleted file, a syntax error, a rejected policy) keeps the
+// last good policy live and is reported with a log line and the
+// defakto_authz_policy_reload{result="error"} counter. The gauge
+// defakto_authz_policy_loaded_timestamp_seconds shows when the live policy was
+// loaded, so an alert can fire when it stays old after an edit.
 type policySource struct {
 	path   string
 	logger log.Logger
+	// kind is the metric tag that tells the live and the shadow policy apart.
+	kind string
+
+	// metrics receives the reload counter and the loaded-at gauge. Set once the
+	// authorizer has its handler; nil before that.
+	metrics atomic.Pointer[metrics.Handler]
+	// loadedAt is the Unix time of the last good load.
+	loadedAt atomic.Int64
 
 	// current holds the last successfully-parsed *cedar.PolicySet, or nil.
 	// Read on the hot path with no lock; swapped atomically on reload.
@@ -36,8 +64,8 @@ type policySource struct {
 
 // newPolicySource loads the policy at path once (which MUST succeed, or the
 // server refuses to start) and begins watching it for changes.
-func newPolicySource(path string, groups *actionGroups, logger log.Logger) (*policySource, error) {
-	s := &policySource{path: path, logger: logger, groups: groups}
+func newPolicySource(path, kind string, groups *actionGroups, logger log.Logger) (*policySource, error) {
+	s := &policySource{path: path, kind: kind, logger: logger, groups: groups}
 	if err := s.reload(); err != nil {
 		return nil, fmt.Errorf("initial policy load: %w", err)
 	}
@@ -70,11 +98,71 @@ func (s *policySource) reload() error {
 	if err := requireTrustDomainScope(ps); err != nil {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
+	if err := rejectUnscopedActions(ps); err != nil {
+		return fmt.Errorf("policy %q: %w", s.path, err)
+	}
 	if err := s.groups.rejectUnknownActionGroups(ps); err != nil {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
+	s.warnUnknownRPCs(ps)
 	s.current.Store(ps)
+	s.loadedAt.Store(time.Now().Unix())
 	return nil
+}
+
+// setMetrics gives the source its metrics handler and publishes the loaded-at
+// gauge for the policy that is already live.
+func (s *policySource) setMetrics(h metrics.Handler) {
+	s.metrics.Store(&h)
+	s.publishLoadedAt()
+}
+
+func (s *policySource) publishLoadedAt() {
+	if h := s.metrics.Load(); h != nil {
+		(*h).Gauge(metricPolicyLoadedAt).Record(float64(s.loadedAt.Load()), metrics.StringTag("policy", s.kind))
+	}
+}
+
+// reloadAndReport reloads the policy after a file change and reports the result.
+func (s *policySource) reloadAndReport() {
+	err := s.reload()
+	result := "ok"
+	if err != nil {
+		result = "error"
+		// Keep serving the last good policy; surface the failure loudly.
+		s.logger.Error("cedar policy reload failed; keeping previous policy",
+			tag.NewStringTag("policy", s.kind), tag.Error(err))
+	} else {
+		s.logger.Info("cedar policy reloaded", tag.NewStringTag("policy", s.kind))
+	}
+	if h := s.metrics.Load(); h != nil {
+		(*h).Counter(metricPolicyReload).Record(1,
+			metrics.StringTag("policy", s.kind), metrics.StringTag("result", result))
+	}
+	if err == nil {
+		s.publishLoadedAt()
+	}
+}
+
+// rejectUnscopedActions refuses a permit with no action scope. Such a permit
+// grants every RPC that has a shipped group, the admin groups included, and is
+// almost always a mistake. A forbid may leave the action unscoped.
+func rejectUnscopedActions(ps *cedar.PolicySet) error {
+	var bad []string
+	for id, p := range ps.All() {
+		if a := p.AST(); a.Effect == ast.EffectPermit {
+			if _, all := a.Action.(ast.ScopeTypeAll); all {
+				bad = append(bad, string(id))
+			}
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return fmt.Errorf("%s is a permit with no action scope, which grants every group, the admin groups included; "+
+		"scope it with `action in [Action::\"<group>\", ...]` (the README lists the groups)",
+		strings.Join(bad, ", "))
 }
 
 // requireTrustDomainScope refuses a permit that does not mention
@@ -123,21 +211,12 @@ func isPrincipalVar(n ast.IsNode) bool {
 	return ok && v.Name == "principal"
 }
 
-// rejectUnknownActionGroups refuses a policy whose action scope names a group
-// that is neither shipped nor in config actionGroups. A misspelled group, such as
-// "delte-all" in a forbid, would match nothing and silently stop forbidding.
-// A name with a "/" is one RPC, which a policy may name even when the image does
-// not know it yet, so it is not checked. The action scope and every when or
-// unless body are both checked.
-func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
-	if g == nil {
-		return nil
-	}
-	var bad []string
+// actionEntities calls visit for every Action entity a policy names, in its
+// action scope and in any when or unless body.
+func actionEntities(ps *cedar.PolicySet, visit func(id cedar.PolicyID, uid types.EntityUID)) {
 	check := func(id cedar.PolicyID, uid types.EntityUID) {
-		name := string(uid.ID)
-		if uid.Type == actionAccess && !strings.Contains(name, "/") && !g.knownGroup(name) {
-			bad = append(bad, fmt.Sprintf("policy %s: unknown action group %q", id, name))
+		if uid.Type == actionAccess {
+			visit(id, uid)
 		}
 	}
 	for id, p := range ps.All() {
@@ -152,7 +231,7 @@ func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
 			}
 		}
 		// An Action entity inside a when or unless body, such as
-		// `unless { action in Action::"delte-all" }`, is checked the same way.
+		// `unless { action in Action::"delte-all" }`, is visited the same way.
 		for _, c := range p.AST().Conditions {
 			ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
 				if v, ok := n.(ast.NodeValue); ok {
@@ -171,12 +250,46 @@ func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
 			})
 		}
 	}
+}
+
+// rejectUnknownActionGroups refuses a policy whose action scope names a group
+// that is neither shipped nor in config actionGroups. A misspelled group, such as
+// "delte-all" in a forbid, would match nothing and silently stop forbidding.
+// A name with a "/" is one RPC, which a policy may name even when the image does
+// not know it yet, so it is not rejected; warnUnknownRPCs reports a likely typo.
+// The action scope and every when or unless body are both checked.
+func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
+	if g == nil {
+		return nil
+	}
+	var bad []string
+	actionEntities(ps, func(id cedar.PolicyID, uid types.EntityUID) {
+		name := string(uid.ID)
+		if !strings.Contains(name, "/") && !g.knownGroup(name) {
+			bad = append(bad, fmt.Sprintf("policy %s: unknown action group %q", id, name))
+		}
+	})
 	if len(bad) == 0 {
 		return nil
 	}
 	sort.Strings(bad)
 	return fmt.Errorf("%s; use a shipped group, a name from config actionGroups, or one RPC as \"<Service>/<Method>\"",
 		strings.Join(bad, "; "))
+}
+
+// warnUnknownRPCs logs a warning for each RPC the policy names that looks like a
+// typo: a method the image's own Temporal services do not have. It cannot reject
+// them, because a policy may name a new RPC before this image knows it. A
+// misspelled name in a forbid would otherwise forbid nothing without any signal.
+func (s *policySource) warnUnknownRPCs(ps *cedar.PolicySet) {
+	actionEntities(ps, func(id cedar.PolicyID, uid types.EntityUID) {
+		if name := string(uid.ID); unknownRPC(name) {
+			s.logger.Warn("policy names an RPC this image does not know; a typo here matches nothing",
+				tag.NewStringTag("policy", s.kind),
+				tag.NewStringTag("policyID", string(id)),
+				tag.NewStringTag("action", name))
+		}
+	})
 }
 
 // rejectLegacyPrincipalScopes refuses a policy whose principal scope is
@@ -245,7 +358,7 @@ func (s *policySource) watch() error {
 	}
 	// Watch the parent dir, not the file: a ConfigMap update replaces the file
 	// via an atomic symlink swap, which a direct file watch misses.
-	if err := w.Add(dirOf(s.path)); err != nil {
+	if err := w.Add(filepath.Dir(s.path)); err != nil {
 		_ = w.Close()
 		return err
 	}
@@ -254,20 +367,29 @@ func (s *policySource) watch() error {
 	return nil
 }
 
-// loop reloads the policy on each watcher event until the watcher closes.
+// relevant reports whether a directory event can change the policy: the policy
+// file itself, or "..data", the symlink a mounted ConfigMap swaps on update.
+func (s *policySource) relevant(ev fsnotify.Event) bool {
+	name := filepath.Base(ev.Name)
+	return name == filepath.Base(s.path) || name == "..data"
+}
+
+// loop reloads the policy after file events stop, until the watcher closes.
 func (s *policySource) loop() {
+	timer := time.NewTimer(reloadDebounce)
+	timer.Stop()
+	defer timer.Stop()
 	for {
 		select {
-		case _, ok := <-s.watcher.Events:
+		case ev, ok := <-s.watcher.Events:
 			if !ok {
 				return
 			}
-			if err := s.reload(); err != nil {
-				// Keep serving the last good policy; surface the failure loudly.
-				s.logger.Error("cedar policy reload failed; keeping previous policy", tag.Error(err))
-			} else {
-				s.logger.Info("cedar policy reloaded")
+			if s.relevant(ev) {
+				timer.Reset(reloadDebounce)
 			}
+		case <-timer.C:
+			s.reloadAndReport()
 		case err, ok := <-s.watcher.Errors:
 			if !ok {
 				return
@@ -283,17 +405,4 @@ func (s *policySource) Close() error {
 		return s.watcher.Close()
 	}
 	return nil
-}
-
-// dirOf returns the parent directory of path.
-func dirOf(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' {
-			if i == 0 {
-				return "/"
-			}
-			return path[:i]
-		}
-	}
-	return "."
 }

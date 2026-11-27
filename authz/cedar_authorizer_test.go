@@ -293,7 +293,7 @@ func TestAuthorize_CustomAttributeInPolicy(t *testing.T) {
 // the authorizer turns into a deny (never an allow).
 func TestAuthorize_UndefinedAttributeDenies(t *testing.T) {
 	t.Parallel()
-	a := newTestAuthorizer(t, `permit (principal, action, resource) when { principal.trust_domain == "corp.defakto.security" && principal.nameSpace == "payments" };`)
+	a := newTestAuthorizer(t, `permit (principal, action in Action::"workflow-start", resource) when { principal.trust_domain == "corp.defakto.security" && principal.nameSpace == "payments" };`)
 	res, err := a.Authorize(context.Background(), claimsFor(svcID, authn.RoleClassService), target(svc+"StartWorkflowExecution"))
 	require.NoError(t, err)
 	require.Equal(t, authorization.DecisionDeny, res.Decision)

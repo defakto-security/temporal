@@ -64,7 +64,7 @@ func (c *captureLogger) decisions(kind string) []logLine {
 	return out
 }
 
-type countRecord struct{ decision, shadow, verb, reason string }
+type countRecord struct{ decision, shadow, group, reason string }
 
 // countingHandler records decision counters.
 type countingHandler struct {
@@ -89,8 +89,8 @@ func (h *countingHandler) record(tags []metrics.Tag) {
 			r.decision = t.Value
 		case "shadow_decision":
 			r.shadow = t.Value
-		case "verb":
-			r.verb = t.Value
+		case "group":
+			r.group = t.Value
 		case "reason":
 			r.reason = t.Value
 		}
@@ -157,7 +157,7 @@ func TestShadow_LiveAllowsCandidateDenies(t *testing.T) {
 	require.Len(t, wd, 1)
 	require.Equal(t, svcID, wd[0].fields["principal"])
 	require.Equal(t, "billing", wd[0].fields["namespace"])
-	require.Equal(t, "workflow-start", wd[0].fields["verb"])
+	require.Equal(t, "workflow-start", wd[0].fields["group"])
 	require.Equal(t, "worker", wd[0].fields["attributes"].(map[string]string)["sa"])
 	require.Equal(t, "delta", wd[0].fields["shadowDecision"])
 	// One counter per call: live allow, shadow delta.
@@ -172,7 +172,7 @@ func TestShadow_LiveAllowsCandidateDenies(t *testing.T) {
 func TestShadow_CandidateErrorDoesNotChangeLive(t *testing.T) {
 	t.Parallel()
 	// Reads an attribute that does not exist: Cedar errors on it.
-	broken := `permit (principal, action, resource) when { principal.trust_domain == "corp.defakto.security" && principal.nope == "x" };`
+	broken := `permit (principal, action in Action::"workflow-start", resource) when { principal.trust_domain == "corp.defakto.security" && principal.nope == "x" };`
 	a, logger, _ := newShadowAuthorizer(t, loadReferencePolicy(t), broken, spiffeconfig.DecisionLogOff)
 
 	res := call(t, a, svcID, "payments")
@@ -372,7 +372,7 @@ func TestAdminForbidWithException(t *testing.T) {
 	policy := loadReferencePolicy(t) + `
 permit (
   principal in RoleClass::"service",
-  action,
+  action in [Action::"namespace-admin", Action::"cluster-admin"],
   resource
 ) when { principal.trust_domain == "corp.defakto.security" };
 forbid (principal, action in [Action::"namespace-admin", Action::"cluster-admin"], resource)
