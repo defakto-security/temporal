@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -205,12 +206,20 @@ func rejectUnscopedActions(ps *cedar.PolicySet) error {
 		strings.Join(bad, ", "))
 }
 
-// requireTrustDomainScope refuses a permit that does not mention
-// principal.trust_domain, unless it names one exact Workload. Any trust domain
-// the SPIFFE agent holds a bundle for (federated ones too) can authenticate,
-// so an unscoped permit would admit all of them. This is a guard against
-// forgetting the scope, not a proof: it checks that the condition reads the
-// attribute, not what the condition does with it.
+// requireTrustDomainScope refuses a permit that does not pin
+// principal.trust_domain to literal values, unless it names one exact Workload.
+// Any trust domain the SPIFFE agent holds a bundle for (federated ones too) can
+// authenticate, so an unpinned permit would admit all of them.
+//
+// A permit passes when one of its conditions requires the trust domain to equal
+// a string literal, or to be one of a list of literals:
+//
+//	when   { principal.trust_domain == "corp.example" && ... }
+//	when   { ["a.example", "b.example"].contains(principal.trust_domain) }
+//	unless { principal.trust_domain != "corp.example" || ... }
+//
+// A comparison with another attribute, a `!=` in a `when`, an `||` with a
+// condition on anything else, or a negation does not pin it, and is refused.
 func requireTrustDomainScope(ps *cedar.PolicySet) error {
 	for id, p := range ps.All() {
 		a := p.AST()
@@ -220,29 +229,106 @@ func requireTrustDomainScope(ps *cedar.PolicySet) error {
 		if sc, ok := a.Principal.(ast.ScopeTypeEq); ok && sc.Entity.Type == entityWorkload {
 			continue
 		}
-		if !conditionsReadTrustDomain(a.Conditions) {
-			return fmt.Errorf("policy %s is a permit that does not scope principal.trust_domain; "+
+		if !conditionsPinTrustDomain(a.Conditions) {
+			return fmt.Errorf("policy %s is a permit that does not pin principal.trust_domain to a literal; "+
 				"add `when { principal.trust_domain == \"<your trust domain>\" }` "+
-				"(federated trust domains can authenticate, so an unscoped permit admits them)", id)
+				"(federated trust domains can authenticate, so an unpinned permit admits them)", id)
 		}
 	}
 	return nil
 }
 
-// conditionsReadTrustDomain reports whether any when/unless body reads
-// principal.trust_domain. The receiver must be the principal variable itself:
-// `context.trust_domain` or a record literal's field does not count.
-func conditionsReadTrustDomain(conds []ast.ConditionType) bool {
-	found := false
+// conditionsPinTrustDomain reports whether the conditions, which all must hold,
+// force principal.trust_domain to a literal. One pinning condition is enough.
+func conditionsPinTrustDomain(conds []ast.ConditionType) bool {
 	for _, c := range conds {
-		ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
-			if t, ok := n.(ast.NodeTypeAccess); ok && string(t.Value) == spiffeconfig.TrustDomainAttribute && isPrincipalVar(t.Arg) {
-				found = true
+		switch c.Condition {
+		case ast.ConditionWhen:
+			if pinsWhenTrue(c.Body) {
+				return true
 			}
-			return !found
-		})
+		case ast.ConditionUnless:
+			// unless { A || B } holds when A and B are both false, so one
+			// disjunct that is `trust_domain != literal` pins it.
+			for _, d := range splitOp(c.Body, true) {
+				if ne, ok := d.(ast.NodeTypeNotEquals); ok && isTrustDomainVsLiteral(ne.Left, ne.Right) {
+					return true
+				}
+			}
+		}
 	}
-	return found
+	return false
+}
+
+// pinsWhenTrue reports whether n being true forces principal.trust_domain to a
+// literal: one `&&` operand is such a test, or an `||` whose every operand is.
+func pinsWhenTrue(n ast.IsNode) bool {
+	return slices.ContainsFunc(splitOp(n, false), pinsOne)
+}
+
+// pinsOne reports whether n, an operand of `&&`, forces the trust domain.
+func pinsOne(n ast.IsNode) bool {
+	switch t := n.(type) {
+	case ast.NodeTypeEquals:
+		return isTrustDomainVsLiteral(t.Left, t.Right)
+	case ast.NodeTypeContains:
+		set, ok := t.Left.(ast.NodeTypeSet)
+		if !ok || !isTrustDomain(t.Right) || len(set.Elements) == 0 {
+			return false
+		}
+		for _, e := range set.Elements {
+			if !isStringLiteral(e) {
+				return false
+			}
+		}
+		return true
+	case ast.NodeTypeOr:
+		// Every branch must pin it: `td == "a" || td == "b"`, not `|| true`.
+		for _, d := range splitOp(t, true) {
+			if !pinsOne(d) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// splitOp flattens a chain of `||` (or, when or is false, `&&`) into operands.
+func splitOp(n ast.IsNode, or bool) []ast.IsNode {
+	switch t := n.(type) {
+	case ast.NodeTypeOr:
+		if or {
+			return append(splitOp(t.Left, or), splitOp(t.Right, or)...)
+		}
+	case ast.NodeTypeAnd:
+		if !or {
+			return append(splitOp(t.Left, or), splitOp(t.Right, or)...)
+		}
+	}
+	return []ast.IsNode{n}
+}
+
+// isTrustDomain reports whether n is `principal.trust_domain`.
+func isTrustDomain(n ast.IsNode) bool {
+	t, ok := n.(ast.NodeTypeAccess)
+	return ok && string(t.Value) == spiffeconfig.TrustDomainAttribute && isPrincipalVar(t.Arg)
+}
+
+// isStringLiteral reports whether n is a string literal.
+func isStringLiteral(n ast.IsNode) bool {
+	v, ok := n.(ast.NodeValue)
+	if !ok {
+		return false
+	}
+	_, ok = v.Value.(types.String)
+	return ok
+}
+
+// isTrustDomainVsLiteral reports whether a and b are principal.trust_domain and
+// a string literal, in either order.
+func isTrustDomainVsLiteral(a, b ast.IsNode) bool {
+	return (isTrustDomain(a) && isStringLiteral(b)) || (isTrustDomain(b) && isStringLiteral(a))
 }
 
 // isPrincipalVar reports whether n is the `principal` variable.

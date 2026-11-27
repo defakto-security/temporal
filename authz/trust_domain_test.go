@@ -42,6 +42,49 @@ func TestPolicyLoad_RejectsUnscopedPermit(t *testing.T) {
 	}
 }
 
+// Reading the attribute is not enough: the permit must pin it to literals. Each
+// of these reads principal.trust_domain and still admits a federated domain.
+func TestPolicyLoad_RejectsTrustDomainThatIsNotPinned(t *testing.T) {
+	t.Parallel()
+	const head = `permit (principal in RoleClass::"service", action in Action::"read-all", resource) `
+	for _, cond := range []string{
+		`when { principal.trust_domain == principal.trust_domain }`,
+		`when { principal.trust_domain == principal.ns }`,
+		`when { principal.trust_domain != "corp.defakto.security" }`,
+		`when { principal.trust_domain == "corp.defakto.security" || true }`,
+		`when { principal.trust_domain == "corp.defakto.security" || principal.ns == "x" }`,
+		`when { true || principal.trust_domain == "corp.defakto.security" }`,
+		`when { !(principal.trust_domain == "corp.defakto.security") }`,
+		`when { principal.trust_domain like "*" }`,
+		`unless { principal.trust_domain == "corp.defakto.security" }`,
+		`unless { principal.trust_domain != "corp.defakto.security" && principal.ns == "x" }`,
+		`when { [principal.ns].contains(principal.trust_domain) }`,
+		`when { [].contains(principal.trust_domain) }`,
+	} {
+		require.ErrorContains(t, loadPolicy(t, head+cond+";"), "does not pin principal.trust_domain", cond)
+	}
+}
+
+// Literal pins load, in the forms the README and reference policy use.
+func TestPolicyLoad_AcceptsTrustDomainPinnedToLiterals(t *testing.T) {
+	t.Parallel()
+	const head = `permit (principal in RoleClass::"service", action in Action::"read-all", resource) `
+	for _, cond := range []string{
+		`when { principal.trust_domain == "corp.defakto.security" }`,
+		`when { "corp.defakto.security" == principal.trust_domain }`,
+		`when { principal.ns == "payments" && principal.trust_domain == "corp.defakto.security" }`,
+		`when { principal.trust_domain == "a.example" || principal.trust_domain == "b.example" }`,
+		`when { ["a.example", "b.example"].contains(principal.trust_domain) }`,
+		`when { principal.ns == "x" } when { principal.trust_domain == "corp.defakto.security" }`,
+		`unless { principal.trust_domain != "corp.defakto.security" }`,
+		`unless { principal.ns == "bad" || principal.trust_domain != "corp.defakto.security" }`,
+		// An extra unless does not undo a pin.
+		`when { principal.trust_domain == "a.example" } unless { principal.trust_domain == "b.example" }`,
+	} {
+		require.NoError(t, loadPolicy(t, head+cond+";"), cond)
+	}
+}
+
 // Scoped permits, exact-Workload permits, and any forbid load.
 func TestPolicyLoad_AcceptsScopedPolicies(t *testing.T) {
 	t.Parallel()

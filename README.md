@@ -83,7 +83,7 @@ the table does not list.
   No compiled-in forbid set. The server **refuses to start** on an absent,
   unparseable, or invalid policy. The shipped `reference/policy.cedar` forbids
   the destruction verbs by default. The loader rejects a policy that
-  - has a permit that does not scope `principal.trust_domain`,
+  - has a permit that does not pin `principal.trust_domain` to literal values,
   - has a permit with no `action` scope (it would grant every admin group),
   - names a group that does not exist (a typo in a `forbid` would forbid nothing),
   - reads a `principal.<name>` that is not `trust_domain` or a configured
@@ -100,8 +100,11 @@ the table does not list.
 ## Trust boundaries to know
 
 - Any trust domain the SPIFFE agent holds a bundle for (federated ones too) can
-  authenticate. Every `permit` must scope `principal.trust_domain` (or name one
-  exact Workload); the policy loader rejects one that does not.
+  authenticate. Every `permit` must pin `principal.trust_domain` to literal
+  values, such as `when { principal.trust_domain == "corp.example" }` or
+  `when { ["a.example", "b.example"].contains(principal.trust_domain) }` (or
+  name one exact Workload). The loader rejects a permit that only reads it, such as
+  `principal.trust_domain == principal.trust_domain`, `!= "x"` or `|| true`.
   `trust_domain` is read from the SPIFFE ID and cannot be overridden.
 - A JWT-SVID is a bearer token. Serve the frontend over TLS and give each
   cluster its own `workloadAPI.audience`. A token with more than one audience
