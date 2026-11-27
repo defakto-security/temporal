@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 	"go.temporal.io/server/common/config"
+	"go.temporal.io/server/common/metrics"
 )
 
 // PluginPGX is the only Temporal SQL plugin this package supports. The lib/pq
@@ -49,6 +50,7 @@ type Manager struct {
 	creds    aws.CredentialsProvider
 	interval time.Duration
 	onError  func(error)
+	metrics  metrics.Handler
 
 	mu      sync.Mutex
 	closed  bool
@@ -63,8 +65,16 @@ func NewManager(region string, creds aws.CredentialsProvider, interval time.Dura
 		creds:    creds,
 		interval: interval,
 		onError:  onError,
+		metrics:  metrics.NoopMetricsHandler,
 		sources:  map[string]*TokenSource{},
 	}
+}
+
+// WithMetrics sets the handler that receives token refresh metrics. Call it
+// before Apply.
+func (m *Manager) WithMetrics(h metrics.Handler) *Manager {
+	m.metrics = h
+	return m
 }
 
 // Close stops every refresh loop.
@@ -159,6 +169,7 @@ func (m *Manager) source(ctx context.Context, endpoint, user string) (*TokenSour
 		Credentials:     m.creds,
 		RefreshInterval: m.interval,
 		OnError:         m.onError,
+		Metrics:         m.metrics,
 	})
 	if err != nil {
 		return nil, err

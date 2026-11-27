@@ -2,13 +2,13 @@
 //
 // It is the stock go.temporal.io/server wired with two hooks:
 //   - authn.ClaimMapper   maps a Defakto SPIFFE identity to Temporal Claims.
-//   - authz.CedarAuthorizer decides f(role_class, namespace, verb_class).
+//   - authz.CedarAuthorizer decides f(principal, namespace, action).
 //
 // Everything else — persistence, the frontend, matching, history — is the
 // upstream server unchanged. This package compiles those hooks into a single
 // binary published as the defakto-spiffe-temporal image. A customer runs it
 // on the stock Temporal Helm chart by swapping image: and mounting a ConfigMap
-// that carries the trust-domain/issuer config and the Cedar policy.
+// that carries the Workload API, audience and attribute config and the Cedar policy.
 package main
 
 import (
@@ -142,7 +142,7 @@ func run() error {
 	// Optional RDS IAM auth: load Temporal's config here so we can hook the
 	// SQL stores, then hand the result to the server.
 	if appCfg.DatabaseIAM.Enabled {
-		mgr, err := setupDatabaseIAM(appCfg.DatabaseIAM, tcfg, logger)
+		mgr, err := setupDatabaseIAM(appCfg.DatabaseIAM, tcfg, logger, metricsHandler)
 		if err != nil {
 			return err
 		}
@@ -177,7 +177,7 @@ func run() error {
 
 // setupDatabaseIAM points every SQL store in tcfg at the cached RDS IAM token.
 // The caller must Close the returned Manager.
-func setupDatabaseIAM(iam spiffeconfig.DatabaseIAMConfig, tcfg *config.Config, logger log.Logger) (*dbauth.Manager, error) {
+func setupDatabaseIAM(iam spiffeconfig.DatabaseIAMConfig, tcfg *config.Config, logger log.Logger, mh metrics.Handler) (*dbauth.Manager, error) {
 	region := iam.Region
 	if region == "" {
 		region = os.Getenv("AWS_REGION")
@@ -198,7 +198,7 @@ func setupDatabaseIAM(iam spiffeconfig.DatabaseIAMConfig, tcfg *config.Config, l
 	}
 	mgr := dbauth.NewManager(region, awsCfg.Credentials, iam.RefreshInterval, func(err error) {
 		logger.Error("RDS IAM token refresh failed; keeping the previous token", tag.Error(err))
-	})
+	}).WithMetrics(mh)
 	if err := mgr.Apply(tcfg); err != nil {
 		mgr.Close()
 		return nil, fmt.Errorf("databaseIAM: %w", err)

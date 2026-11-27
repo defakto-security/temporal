@@ -16,8 +16,17 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/rds/auth"
+	"go.temporal.io/server/common/metrics"
 
 	"github.com/defakto-security/temporal/config"
+)
+
+// Metric names. Alert on a rising failure count and on the expiry timestamp
+// getting close to the current time: a token that is not renewed stops working
+// when it expires, and by then every new database connection fails.
+const (
+	metricRefresh      = "defakto_dbauth_token_refresh"
+	metricTokenExpires = "defakto_dbauth_token_expires_timestamp_seconds"
 )
 
 // minRefreshInterval is the shortest accepted refresh interval. A var so
@@ -59,6 +68,9 @@ type Options struct {
 	RefreshInterval time.Duration
 	// OnError is called when a refresh fails. May be nil.
 	OnError func(error)
+	// Metrics receives the refresh counter and the token expiry gauge. Nil means
+	// no metrics.
+	Metrics metrics.Handler
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
 }
@@ -87,6 +99,9 @@ func NewTokenSource(ctx context.Context, opts Options) (*TokenSource, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.Metrics == nil {
+		opts.Metrics = metrics.NoopMetricsHandler
+	}
 	t := &TokenSource{opts: opts, done: make(chan struct{})}
 	if err := t.refresh(ctx); err != nil {
 		return nil, fmt.Errorf("dbauth: first token for %s: %w", opts.Endpoint, err)
@@ -111,9 +126,9 @@ func (o Options) validate() error {
 	if o.Credentials == nil {
 		errs = append(errs, errors.New("credentials are required"))
 	}
-	if o.RefreshInterval < minRefreshInterval || o.RefreshInterval >= TokenLifetime-expiryMargin {
-		errs = append(errs, fmt.Errorf("refresh interval %s must be at least %s and shorter than %s",
-			o.RefreshInterval, minRefreshInterval, TokenLifetime-expiryMargin))
+	if o.RefreshInterval < minRefreshInterval || o.RefreshInterval > config.MaxRefreshInterval {
+		errs = append(errs, fmt.Errorf("refresh interval %s must be between %s and %s",
+			o.RefreshInterval, minRefreshInterval, config.MaxRefreshInterval))
 	}
 	return errors.Join(errs...)
 }
@@ -173,13 +188,17 @@ func (t *TokenSource) refresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 	now := t.opts.Now()
+	endpoint := metrics.StringTag("endpoint", t.opts.Endpoint)
 	token, expires, err := buildToken(ctx, t.opts.Credentials, t.opts.Endpoint, t.opts.Region, t.opts.User, now)
 	if err != nil {
+		t.opts.Metrics.Counter(metricRefresh).Record(1, endpoint, metrics.StringTag("result", "error"))
 		return err
 	}
 	t.mu.Lock()
 	t.token, t.expires = token, expires
 	t.mu.Unlock()
+	t.opts.Metrics.Counter(metricRefresh).Record(1, endpoint, metrics.StringTag("result", "ok"))
+	t.opts.Metrics.Gauge(metricTokenExpires).Record(float64(expires.Unix()), endpoint)
 	return nil
 }
 
