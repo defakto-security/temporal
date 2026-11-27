@@ -121,8 +121,8 @@ func run() error {
 		return err
 	}
 
-	// The Cedar authorizer loads + validates the customer-owned policy and
-	// fails closed on an absent, unparseable, or schema-invalid policy.
+	// The Cedar authorizer loads and checks the customer-owned policy. The
+	// server does not start on an absent, unparseable or rejected policy.
 	authorizer, err := authz.NewCedarAuthorizer(appCfg, logger)
 	if err != nil {
 		return err
