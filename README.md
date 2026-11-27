@@ -61,7 +61,7 @@ at once, so the shipped forbids and the admin grants cover it. A new
 until a permit names it, and it stays denied until then. What stops a new
 `WorkflowService` RPC from slipping in unclassified is a test, not the policy:
 `TestWorkflowServiceClassified` fails the build when an API upgrade adds an RPC
-the table does not list. The publish workflow runs it before it pushes an image.
+the table does not list.
 
 - **actionGroups** — your own bundles. A member is an RPC such as
   `WorkflowService/QueryWorkflow`, or a shipped or customer group. A group
