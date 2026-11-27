@@ -4,8 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/authorization"
@@ -132,7 +134,7 @@ func newAuthorizerWith(t *testing.T, live, shadow, level, identityMode string) (
 	}
 	a, err := NewCedarAuthorizer(cfg, logger)
 	require.NoError(t, err)
-	a.WithMetrics(h)
+	a.WithMetrics(h, "frontend")
 	t.Cleanup(func() { _ = a.Close() })
 	return a, logger, h
 }
@@ -171,8 +173,8 @@ func TestShadow_LiveAllowsCandidateDenies(t *testing.T) {
 
 func TestShadow_CandidateErrorDoesNotChangeLive(t *testing.T) {
 	t.Parallel()
-	// Reads an attribute that does not exist: Cedar errors on it.
-	broken := `permit (principal, action in Action::"workflow-start", resource) when { principal.trust_domain == "corp.defakto.security" && principal.nope == "x" };`
+	// Compares a string with a number: Cedar errors on it at run time.
+	broken := `permit (principal, action in Action::"workflow-start", resource) when { principal.trust_domain == "corp.defakto.security" && principal.ns > 1 };`
 	a, logger, _ := newShadowAuthorizer(t, loadReferencePolicy(t), broken, spiffeconfig.DecisionLogOff)
 
 	res := call(t, a, svcID, "payments")
@@ -424,4 +426,44 @@ func TestMetrics_TaggedWithFrontendService(t *testing.T) {
 		}
 	}
 	require.Equal(t, "frontend", got)
+}
+
+// The authorizer runs before Temporal checks the namespace, so a caller picks
+// it. The log carries at most 256 bytes of it. The decision still uses the full
+// name.
+func TestDecisionLog_TruncatesNamespace(t *testing.T) {
+	t.Parallel()
+	a, logger, _ := newShadowAuthorizer(t, loadReferencePolicy(t), "", spiffeconfig.DecisionLogAll)
+	long := strings.Repeat("n", 5000)
+	res := call(t, a, svcID, long)
+	require.Equal(t, authorization.DecisionAllow, res.Decision)
+	d := logger.decisions(decisionAllow)
+	require.Len(t, d, 1)
+	require.Len(t, d[0].fields["namespace"], maxLoggedNamespaceBytes)
+
+	// A cut in the middle of a multi-byte character leaves valid UTF-8.
+	require.True(t, utf8.ValidString(truncate(strings.Repeat("é", 200), maxLoggedNamespaceBytes)))
+	require.Equal(t, "ab", truncate("ab", maxLoggedNamespaceBytes))
+}
+
+// The metrics carry the service that runs the authorizer, so frontend and
+// internal-frontend can be told apart.
+func TestMetrics_TaggedWithServiceName(t *testing.T) {
+	t.Parallel()
+	for _, svcName := range []string{"frontend", "internal-frontend"} {
+		h := &countingHandler{Handler: metrics.NoopMetricsHandler}
+		a, err := NewCedarAuthorizer(&spiffeconfig.Config{
+			Version: spiffeconfig.SchemaVersion, PolicyPath: writePolicy(t, loadReferencePolicy(t)),
+		}, newCaptureLogger())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = a.Close() })
+		a.WithMetrics(h, svcName)
+		var got string
+		for _, tg := range h.tags {
+			if tg.Key == "service_name" {
+				got = tg.Value
+			}
+		}
+		require.Equal(t, svcName, got)
+	}
 }

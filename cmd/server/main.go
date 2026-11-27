@@ -30,7 +30,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"go.temporal.io/server/common/authorization"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
@@ -87,57 +86,64 @@ func run() error {
 		return err
 	}
 
-	// JWT-SVID verification keys stream from the local SPIFFE agent. Only the
-	// services that take client calls need them; a history or matching pod
-	// runs without an agent. Wait for the first bundles so the server never
-	// starts unable to verify anyone. A SIGTERM during the wait ends it.
-	verifier := authn.DenyAllVerifier()
-	if takesClientCalls(servicesToStart()) {
+	services := servicesToStart()
+
+	// The claim mapper and the authorizer run only in the services that take
+	// client calls. A history, matching or worker pod needs no SPIFFE agent,
+	// policy file or watcher, as in the stock image. The config file is still
+	// read above, because databaseIAM lives in it.
+	//
+	// The server builds its metrics handler from the Temporal config AFTER the
+	// authorizer is constructed, so the authorizer cannot borrow it. Build it
+	// here, the same way the server would, and hand the one instance to
+	// everything: decision counters then appear on the server's own metrics
+	// endpoint.
+	metricsHandler, err := metrics.MetricsHandlerFromConfig(logger, tcfg.Global.Metrics)
+	if err != nil {
+		return err
+	}
+
+	var serverOpts []temporal.ServerOption
+	if takesClientCalls(services) {
+		// JWT-SVID verification keys stream from the local SPIFFE agent. Wait
+		// for the first bundles so the server never starts unable to verify
+		// anyone. A SIGTERM during the wait ends it.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		v, closeVerifier, err := authn.WorkloadAPIVerifier(ctx, appCfg.WorkloadAPI, 30*time.Second)
+		verifier, closeVerifier, err := authn.WorkloadAPIVerifier(ctx, appCfg.WorkloadAPI, 30*time.Second)
 		stop()
 		if err != nil {
 			return err
 		}
 		defer func() { _ = closeVerifier() }()
-		verifier = v
-	}
-	var mapperOpts []authn.Option
-	if appCfg.ClientCertAuth && !takesClientCalls(servicesToStart()) {
-		// No client calls here, so no cert is ever read: an empty set suffices.
-		mapperOpts = append(mapperOpts, authn.WithX509Bundles(x509bundle.NewSet()))
-	} else if appCfg.ClientCertAuth {
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		b, closeBundles, err := authn.WorkloadAPIX509Bundles(ctx, appCfg.WorkloadAPI, 30*time.Second)
-		stop()
+		var mapperOpts []authn.Option
+		if appCfg.ClientCertAuth {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			b, closeBundles, err := authn.WorkloadAPIX509Bundles(ctx, appCfg.WorkloadAPI, 30*time.Second)
+			stop()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = closeBundles() }()
+			mapperOpts = append(mapperOpts, authn.WithX509Bundles(b))
+		}
+		claimMapper, err := authn.NewClaimMapper(appCfg, verifier, logger, mapperOpts...)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = closeBundles() }()
-		mapperOpts = append(mapperOpts, authn.WithX509Bundles(b))
-	}
-	claimMapper, err := authn.NewClaimMapper(appCfg, verifier, logger, mapperOpts...)
-	if err != nil {
-		return err
-	}
 
-	// The Cedar authorizer loads and checks the customer-owned policy. The
-	// server does not start on an absent, unparseable or rejected policy.
-	authorizer, err := authz.NewCedarAuthorizer(appCfg, logger)
-	if err != nil {
-		return err
+		// The Cedar authorizer loads and checks the customer-owned policy. The
+		// server does not start on an absent, unparseable or rejected policy.
+		authorizer, err := authz.NewCedarAuthorizer(appCfg, logger)
+		if err != nil {
+			return err
+		}
+		authorizer.WithMetrics(metricsHandler, clientServiceName(services))
+		defer func() { _ = authorizer.Close() }()
+		serverOpts = append(serverOpts,
+			temporal.WithAuthorizer(authorizer),
+			temporal.WithClaimMapper(func(*config.Config) authorization.ClaimMapper { return claimMapper }),
+		)
 	}
-
-	// The server builds its metrics handler from the Temporal config AFTER the
-	// authorizer is constructed, so the authorizer cannot borrow it. Build it
-	// here, the same way the server would, and hand the one instance to both:
-	// decision counters then appear on the server's own metrics endpoint.
-	metricsHandler, err := metrics.MetricsHandlerFromConfig(logger, tcfg.Global.Metrics)
-	if err != nil {
-		return err
-	}
-	authorizer.WithMetrics(metricsHandler)
-	defer func() { _ = authorizer.Close() }()
 
 	// Optional RDS IAM auth: load Temporal's config here so we can hook the
 	// SQL stores, then hand the result to the server.
@@ -154,15 +160,12 @@ func run() error {
 		// service not named), so the process would run no frontend/history/
 		// matching/worker and silently idle. Honor TEMPORAL_SERVICES as the
 		// stock image does, defaulting to the full set.
-		temporal.ForServices(servicesToStart()),
+		temporal.ForServices(services),
 		temporal.WithConfig(tcfg),
 		temporal.WithLogger(logger),
 		temporal.WithCustomMetricsHandler(metricsHandler),
-		temporal.WithAuthorizer(authorizer),
-		temporal.WithClaimMapper(func(*config.Config) authorization.ClaimMapper {
-			return claimMapper
-		}),
 	}
+	opts = append(opts, serverOpts...)
 	s, err := temporal.NewServer(opts...)
 	if err != nil {
 		return err
@@ -215,6 +218,18 @@ func takesClientCalls(services []string) bool {
 		}
 	}
 	return false
+}
+
+// clientServiceName is the service_name metric tag for the authorizer: the
+// client-facing services this process runs, joined by commas.
+func clientServiceName(services []string) string {
+	var names []string
+	for _, s := range services {
+		if s == "frontend" || s == "internal-frontend" {
+			names = append(names, s)
+		}
+	}
+	return strings.Join(names, ",")
 }
 
 // servicesToStart returns the service names this process should run. It reads

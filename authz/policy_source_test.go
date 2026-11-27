@@ -94,7 +94,7 @@ func TestPolicyReload(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = a.Close() })
 	h := newReloadMetrics()
-	a.WithMetrics(h)
+	a.WithMetrics(h, "frontend")
 
 	require.Equal(t, authorization.DecisionAllow, call(t, a, svcID, "payments").Decision)
 	require.NotEmpty(t, h.loaded, "the loaded-at gauge is published when metrics are attached")

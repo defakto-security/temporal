@@ -54,6 +54,18 @@ type CedarAuthorizer struct {
 	namespaces map[string]struct{}
 }
 
+// maxLoggedNamespaceBytes caps the namespace in a log line. The authorizer runs
+// before Temporal checks the namespace, so an unauthenticated caller chooses it.
+const maxLoggedNamespaceBytes = 256
+
+// truncate cuts s to at most n bytes.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "")
+}
+
 // maxMetricNamespaces caps distinct namespace tag values.
 const maxMetricNamespaces = 256
 
@@ -102,7 +114,11 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 		return nil, err
 	}
 	warnUnknownGroupRPCs(cfg.ActionGroups, logger)
-	ps, err := newPolicySource(cfg.PolicyPath, "live", groups, logger)
+	attrNames := map[string]bool{spiffeconfig.TrustDomainAttribute: true}
+	for name := range rules {
+		attrNames[name] = true
+	}
+	ps, err := newPolicySource(cfg.PolicyPath, "live", groups, attrNames, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +139,7 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 			"admin, delete and unclassified APIs stay denied")
 	}
 	if cfg.ShadowPolicyPath != "" {
-		sh, err := newPolicySource(cfg.ShadowPolicyPath, "shadow", groups, logger)
+		sh, err := newPolicySource(cfg.ShadowPolicyPath, "shadow", groups, attrNames, logger)
 		if err != nil {
 			_ = ps.Close()
 			return nil, fmt.Errorf("shadow policy: %w", err)
@@ -134,12 +150,13 @@ func NewCedarAuthorizer(cfg *spiffeconfig.Config, logger log.Logger) (*CedarAuth
 }
 
 // WithMetrics sets the handler that receives decision counters. The default is
-// a no-op.
-func (a *CedarAuthorizer) WithMetrics(h metrics.Handler) *CedarAuthorizer {
-	// The authorizer only runs in the frontend. Temporal tags each service's own
-	// handler with service_name; this one is the untagged root, so tag it here to
-	// line up with Temporal's own authorization metrics.
-	a.metrics = h.WithTags(metrics.ServiceNameTag(primitives.FrontendService))
+// a no-op. service is the Temporal service the authorizer runs in ("frontend"
+// or "internal-frontend"), so the two listeners can be told apart.
+func (a *CedarAuthorizer) WithMetrics(h metrics.Handler, service string) *CedarAuthorizer {
+	// Temporal tags each service's own handler with service_name; this one is
+	// the untagged root, so tag it here to line up with Temporal's own
+	// authorization metrics.
+	a.metrics = h.WithTags(metrics.ServiceNameTag(primitives.ServiceName(service)))
 	a.policies.setMetrics(a.metrics)
 	if a.shadow != nil {
 		a.shadow.setMetrics(a.metrics)
@@ -181,7 +198,7 @@ func (a *CedarAuthorizer) Authorize(_ context.Context, caller *authorization.Cla
 	if target == nil {
 		return deny("no call target"), nil
 	}
-	d := decisionRecord{apiName: target.APIName, namespace: target.Namespace}
+	d := decisionRecord{apiName: target.APIName, namespace: truncate(target.Namespace, maxLoggedNamespaceBytes)}
 	if caller != nil {
 		d.subject = caller.Subject
 	}

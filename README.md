@@ -85,7 +85,9 @@ the table does not list. The publish workflow runs it before it pushes an image.
   the destruction verbs by default. The loader rejects a policy that
   - has a permit that does not scope `principal.trust_domain`,
   - has a permit with no `action` scope (it would grant every admin group),
-  - names a group that does not exist (a typo in a `forbid` would forbid nothing).
+  - names a group that does not exist (a typo in a `forbid` would forbid nothing),
+  - reads a `principal.<name>` that is not `trust_domain` or a configured
+    attribute (it would error and deny every call).
 
   A name such as `WorkflowService/TerminateWorkflowExection` is only logged as a
   warning, because a policy may name a new RPC before the image knows it.
@@ -184,6 +186,15 @@ forbid (principal,
 
 Then permit that workload by exact ID. `DeleteWorkflowExecution` on both
 services is in `workflow-delete`, so it stays forbidden.
+
+## Which pods need what
+
+Only the services that take client calls (`frontend` and `internal-frontend`)
+load the policy, start the file watcher and connect to the SPIFFE agent.
+`history`, `matching` and `worker` pods need none of them, as in the stock image.
+Every pod still reads the config file, because `databaseIAM` lives in it.
+Decision metrics carry `service_name` set to the listener, so the mTLS
+`internal-frontend` and the JWT `frontend` can be told apart.
 
 ## Layout
 

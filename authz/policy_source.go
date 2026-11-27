@@ -59,13 +59,17 @@ type policySource struct {
 	// groups says which action names a policy may use. Nil skips the check.
 	groups *actionGroups
 
+	// attrs is every attribute a policy may read as principal.<name>: the
+	// configured attribute rules plus trust_domain.
+	attrs map[string]bool
+
 	watcher *fsnotify.Watcher
 }
 
 // newPolicySource loads the policy at path once (which MUST succeed, or the
 // server refuses to start) and begins watching it for changes.
-func newPolicySource(path, kind string, groups *actionGroups, logger log.Logger) (*policySource, error) {
-	s := &policySource{path: path, kind: kind, logger: logger, groups: groups}
+func newPolicySource(path, kind string, groups *actionGroups, attrs map[string]bool, logger log.Logger) (*policySource, error) {
+	s := &policySource{path: path, kind: kind, logger: logger, groups: groups, attrs: attrs}
 	if err := s.reload(); err != nil {
 		return nil, fmt.Errorf("initial policy load: %w", err)
 	}
@@ -96,6 +100,9 @@ func (s *policySource) reload() error {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
 	if err := requireTrustDomainScope(ps); err != nil {
+		return fmt.Errorf("policy %q: %w", s.path, err)
+	}
+	if err := rejectUnknownPrincipalAttributes(ps, s.attrs); err != nil {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
 	if err := rejectUnscopedActions(ps); err != nil {
@@ -142,6 +149,39 @@ func (s *policySource) reloadAndReport() {
 	if err == nil {
 		s.publishLoadedAt()
 	}
+}
+
+// rejectUnknownPrincipalAttributes refuses a policy that reads principal.<name>
+// for a name that is not trust_domain or a configured attribute. Cedar reports
+// the missing attribute as an error on every call, and the authorizer denies
+// every call that reaches the policy, so one typo would be a cluster-wide
+// outage. Nil attrs skips the check.
+func rejectUnknownPrincipalAttributes(ps *cedar.PolicySet, attrs map[string]bool) error {
+	if attrs == nil {
+		return nil
+	}
+	var bad []string
+	for id, p := range ps.All() {
+		for _, c := range p.AST().Conditions {
+			ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
+				if t, ok := n.(ast.NodeTypeAccess); ok && isPrincipalVar(t.Arg) && !attrs[string(t.Value)] {
+					bad = append(bad, fmt.Sprintf("policy %s reads principal.%s", id, t.Value))
+				}
+				return true
+			})
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	known := make([]string, 0, len(attrs))
+	for n := range attrs {
+		known = append(known, n)
+	}
+	sort.Strings(known)
+	return fmt.Errorf("%s, which is not an attribute; known attributes: %s (add one under `attributes` in config.yaml)",
+		strings.Join(bad, "; "), strings.Join(known, ", "))
 }
 
 // rejectUnscopedActions refuses a permit with no action scope. Such a permit
