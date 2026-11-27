@@ -204,10 +204,12 @@ func TestRefreshMetrics(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(src.Close)
 
-	require.Equal(t, 1, rec.count("ok"), "the first token is counted")
+	// Background refreshes may add more, so only a lower bound is stable.
+	require.GreaterOrEqual(t, rec.count("ok"), 1, "the first token is counted")
 	rec.mu.Lock()
-	require.InDelta(t, float64(before.Add(TokenLifetime).Unix()), rec.expiries[0], 2)
+	first := rec.expiries[0]
 	rec.mu.Unlock()
+	require.InDelta(t, float64(before.Add(TokenLifetime).Unix()), first, 2)
 
 	creds.fail.Store(true)
 	require.Eventually(t, func() bool { return rec.count("error") >= 1 }, 5*time.Second, 5*time.Millisecond)

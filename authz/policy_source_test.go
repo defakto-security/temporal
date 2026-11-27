@@ -138,6 +138,28 @@ func TestPolicyReload(t *testing.T) {
 	require.True(t, logged, "a failed reload is logged")
 }
 
+// A policy path that is a symlink to a sibling file reloads when the real file
+// changes, because the event names the target, not the link.
+func TestPolicyReload_SymlinkToSiblingFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.cedar")
+	link := filepath.Join(dir, "policy.cedar")
+	require.NoError(t, os.WriteFile(target, []byte(allowStartPolicy), 0o600))
+	require.NoError(t, os.Symlink("real.cedar", link))
+
+	a, err := NewCedarAuthorizer(&spiffeconfig.Config{Version: spiffeconfig.SchemaVersion, PolicyPath: link}, newCaptureLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = a.Close() })
+	h := newReloadMetrics()
+	a.WithMetrics(h, "frontend")
+	require.Equal(t, authorization.DecisionAllow, call(t, a, svcID, "payments").Decision)
+
+	require.NoError(t, os.WriteFile(target, []byte(denyAllPolicy), 0o600))
+	require.Eventually(t, func() bool { return h.count("ok") == 1 }, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, authorization.DecisionDeny, call(t, a, svcID, "payments").Decision)
+}
+
 // identityMode observe lets a call with no valid identity through without
 // evaluating the policy, so a customer forbid does not stop it. A call with a
 // valid identity is still decided by the policy. This is deliberate: observe is

@@ -188,17 +188,19 @@ func (t *TokenSource) refresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 	now := t.opts.Now()
+	// One series per (endpoint, user), the key the Manager shares sources by.
 	endpoint := metrics.StringTag("endpoint", t.opts.Endpoint)
+	user := metrics.StringTag("user", t.opts.User)
 	token, expires, err := buildToken(ctx, t.opts.Credentials, t.opts.Endpoint, t.opts.Region, t.opts.User, now)
 	if err != nil {
-		t.opts.Metrics.Counter(metricRefresh).Record(1, endpoint, metrics.StringTag("result", "error"))
+		t.opts.Metrics.Counter(metricRefresh).Record(1, endpoint, user, metrics.StringTag("result", "error"))
 		return err
 	}
 	t.mu.Lock()
 	t.token, t.expires = token, expires
 	t.mu.Unlock()
-	t.opts.Metrics.Counter(metricRefresh).Record(1, endpoint, metrics.StringTag("result", "ok"))
-	t.opts.Metrics.Gauge(metricTokenExpires).Record(float64(expires.Unix()), endpoint)
+	t.opts.Metrics.Counter(metricRefresh).Record(1, endpoint, user, metrics.StringTag("result", "ok"))
+	t.opts.Metrics.Gauge(metricTokenExpires).Record(float64(expires.Unix()), endpoint, user)
 	return nil
 }
 

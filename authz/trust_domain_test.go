@@ -53,6 +53,7 @@ func TestPolicyLoad_RejectsTrustDomainThatIsNotPinned(t *testing.T) {
 		`when { principal.trust_domain != "corp.defakto.security" }`,
 		`when { principal.trust_domain == "corp.defakto.security" || true }`,
 		`when { principal.trust_domain == "corp.defakto.security" || principal.ns == "x" }`,
+		`when { (principal.trust_domain == "a.example" && principal.ns == "x") || true }`,
 		`when { true || principal.trust_domain == "corp.defakto.security" }`,
 		`when { !(principal.trust_domain == "corp.defakto.security") }`,
 		`when { principal.trust_domain like "*" }`,
@@ -78,6 +79,8 @@ func TestPolicyLoad_AcceptsTrustDomainPinnedToLiterals(t *testing.T) {
 		`when { principal.ns == "x" } when { principal.trust_domain == "corp.defakto.security" }`,
 		`unless { principal.trust_domain != "corp.defakto.security" }`,
 		`unless { principal.ns == "bad" || principal.trust_domain != "corp.defakto.security" }`,
+		// A branch of an || may be a conjunction.
+		`when { (principal.trust_domain == "a.example" && principal.ns == "x") || principal.trust_domain == "b.example" }`,
 		// An extra unless does not undo a pin.
 		`when { principal.trust_domain == "a.example" } unless { principal.trust_domain == "b.example" }`,
 	} {

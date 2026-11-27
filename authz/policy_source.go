@@ -284,8 +284,9 @@ func pinsOne(n ast.IsNode) bool {
 		return true
 	case ast.NodeTypeOr:
 		// Every branch must pin it: `td == "a" || td == "b"`, not `|| true`.
+		// A branch may be a conjunction, such as `td == "a" && ns == "x"`.
 		for _, d := range splitOp(t, true) {
-			if !pinsOne(d) {
+			if !pinsWhenTrue(d) {
 				return false
 			}
 		}
@@ -494,10 +495,15 @@ func (s *policySource) watch() error {
 }
 
 // relevant reports whether a directory event can change the policy: the policy
-// file itself, or "..data", the symlink a mounted ConfigMap swaps on update.
+// file itself, the file it links to when the path is a symlink to a sibling,
+// or "..data", the symlink a mounted ConfigMap swaps on update.
 func (s *policySource) relevant(ev fsnotify.Event) bool {
 	name := filepath.Base(ev.Name)
-	return name == filepath.Base(s.path) || name == "..data"
+	if name == filepath.Base(s.path) || name == "..data" {
+		return true
+	}
+	target, err := filepath.EvalSymlinks(s.path)
+	return err == nil && name == filepath.Base(target)
 }
 
 // loop reloads the policy after file events stop, until the watcher closes.

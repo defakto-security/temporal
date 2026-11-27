@@ -95,7 +95,11 @@ the table does not list.
   file) **leaves the previous policy live**. It does not fail closed. Watch
   `defakto_authz_policy_reload{result="error"}` and
   `defakto_authz_policy_loaded_timestamp_seconds`. Reloads wait 100 ms after the
-  last file event, so a half-written file is not loaded.
+  last file event. That is best effort: it cannot tell that a slow writer has
+  finished, so a half-written file can still be read. A file that parses and
+  passes the checks but is cut short, for example before a final `forbid`, would
+  then go live. Replace the file atomically (write a temp file, then rename it,
+  as a ConfigMap mount does) when the whole file must appear at once.
 
 ## Trust boundaries to know
 
