@@ -289,14 +289,26 @@ func TestAuthorize_CustomAttributeInPolicy(t *testing.T) {
 	require.Equal(t, authorization.DecisionDeny, res.Decision)
 }
 
-// An attribute name the config never defined is a Cedar evaluation error, which
-// the authorizer turns into a deny (never an allow).
-func TestAuthorize_UndefinedAttributeDenies(t *testing.T) {
+// An attribute name the config never defined would error on every call and deny
+// everything, so the policy is refused at load, and the message lists the
+// attributes that exist. The same name loads once the config defines it.
+func TestPolicyLoad_RejectsUndefinedPrincipalAttribute(t *testing.T) {
 	t.Parallel()
-	a := newTestAuthorizer(t, `permit (principal, action, resource) when { principal.trust_domain == "corp.defakto.security" && principal.nameSpace == "payments" };`)
-	res, err := a.Authorize(context.Background(), claimsFor(svcID, authn.RoleClassService), target(svc+"StartWorkflowExecution"))
+	for _, pol := range []string{
+		`permit (principal, action in Action::"workflow-start", resource) when { principal.trust_domain == "corp.defakto.security" && principal.nameSpace == "payments" };`,
+		`forbid (principal, action in Action::"delete-all", resource) unless { principal.trustdomain == "x" };`,
+	} {
+		err := loadPolicy(t, pol)
+		require.ErrorContains(t, err, "is not an attribute", pol)
+		require.ErrorContains(t, err, "ns, sa, trust_domain", "the message lists the known attributes")
+	}
+	cfg := &spiffeconfig.Config{
+		Version: spiffeconfig.SchemaVersion, PolicyPath: writePolicy(t, `permit (principal, action in Action::"workflow-start", resource) when { principal.trust_domain == "x" && principal.nameSpace == "payments" };`),
+		Attributes: map[string]string{"nameSpace": `.*/ns/([^/]+)/.*`},
+	}
+	a, err := NewCedarAuthorizer(cfg, log.NewNoopLogger())
 	require.NoError(t, err)
-	require.Equal(t, authorization.DecisionDeny, res.Decision)
+	require.NoError(t, a.Close())
 }
 
 // A custom pattern must match the whole ID: a lookalike path that merely

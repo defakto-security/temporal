@@ -65,15 +65,17 @@ data:
     #   refreshInterval: 10m     # tokens last 15m; must stay under 14m
     policyPath: /etc/defakto-spiffe-temporal/policy.cedar
     # Rollout aids. decisionLog: off (default) | deny | all. "all" logs every
-    # decision with principal, attributes, namespace, API and verb.
+    # decision with principal, attributes, namespace, API and group.
     # decisionLog: all
     # identityMode: enforce (default) | observe. Before any policy runs, a call
     # needs an authenticated caller with a role class and a canonical SPIFFE ID.
     # "observe" lets a call that fails these through and logs
     # as `would_deny`, and counts it as decision="allow" with a reason (unauthenticated,
     # unknown_role_class, malformed_subject). Run it until none appear, then
-    # switch to enforce. Policy decisions are always enforced, and the admin and
-    # delete groups, and RPCs the image has no group for, stay denied. Observe is no stricter than
+    # switch to enforce. No policy is evaluated for such a call, so a forbid
+    # does not stop it. A call with a valid identity is still decided by the
+    # policy. The admin and delete groups, and RPCs the image has no group for,
+    # stay denied. For callers without an identity, observe is no stricter than
     # having no authorizer: turn it off once callers are identified.
     # identityMode: observe
     # A candidate policy. Every call is also checked against it; the live

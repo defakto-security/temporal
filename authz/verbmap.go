@@ -1,7 +1,8 @@
 // Package authz decides whether a caller may run a Temporal API call in a
 // namespace. The policy is wholly customer-owned Cedar, loaded from the mounted
-// ConfigMap; there is no compiled-in forbid set. The authorizer fails closed on
-// an absent, unparseable, or schema-invalid policy.
+// ConfigMap; there is no compiled-in forbid set. The authorizer refuses to start
+// on an absent, unparseable or invalid policy. A policy that fails to reload
+// later is kept out and the previous one stays live; see policySource.
 //
 // Every RPC is a Cedar action, named "<Service>/<Method>", for example
 // Action::"WorkflowService/QueryWorkflow". The image ships groups of RPCs, also
@@ -18,6 +19,10 @@ import (
 	"strings"
 
 	"github.com/cedar-policy/cedar-go/types"
+	operatorservice "go.temporal.io/api/operatorservice/v1"
+	workflowservice "go.temporal.io/api/workflowservice/v1"
+	adminservice "go.temporal.io/server/api/adminservice/v1"
+	"google.golang.org/grpc"
 )
 
 // Shipped leaf groups. Each RPC the image knows is a member of exactly one.
@@ -162,8 +167,10 @@ var shippedAggregates = map[string][]string{
 // new upstream operator or admin RPC needs no entry and joins the cluster-admin
 // floor at once. Keyed on the bare method name.
 //
-// DeleteWorkflowExecution stays in workflow-delete so that cluster-admin never
-// reaches destruction.
+// DeleteWorkflowExecution stays in workflow-delete, so cluster-admin never
+// reaches workflow deletion and the delete-all floor covers it. cluster-admin
+// does hold other removals: OperatorService DeleteNamespace, RemoveSearchAttributes,
+// DeleteNexusEndpoint and RemoveRemoteCluster.
 var adminServiceLeaf = map[string]string{
 	"DeleteWorkflowExecution": GroupWorkflowDelete,
 }
@@ -225,22 +232,45 @@ var leafGroups = func() map[string]bool {
 	return m
 }()
 
-// shippedGroupNames is every shipped group, leaf and aggregate.
-func shippedGroupNames() []string {
-	var out []string
-	for g := range leafGroups {
-		out = append(out, g)
-	}
-	for g := range shippedAggregates {
-		out = append(out, g)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func isShippedGroup(name string) bool {
 	_, agg := shippedAggregates[name]
 	return leafGroups[name] || agg
+}
+
+// knownRPCs maps each Temporal service the image has a group table for, by its
+// short name, to the methods the pinned API version has. A policy or customer
+// group that names a method of one of these services which is missing here is
+// probably a typo; see unknownRPC.
+var knownRPCs = func() map[string]map[string]bool {
+	m := make(map[string]map[string]bool)
+	for _, d := range []grpc.ServiceDesc{
+		workflowservice.WorkflowService_ServiceDesc,
+		operatorservice.OperatorService_ServiceDesc,
+		adminservice.AdminService_ServiceDesc,
+	} {
+		methods := make(map[string]bool, len(d.Methods)+len(d.Streams))
+		for _, md := range d.Methods {
+			methods[md.MethodName] = true
+		}
+		for _, sd := range d.Streams {
+			methods[sd.StreamName] = true
+		}
+		m[d.ServiceName[strings.LastIndex(d.ServiceName, ".")+1:]] = methods
+	}
+	return m
+}()
+
+// unknownRPC reports whether action, written "<Service>/<Method>", names a
+// service this image knows with a method that service does not have. A service
+// the image does not know is not reported. A newer image may know a method that
+// an older policy names, so this is a warning for the operator, never an error.
+func unknownRPC(action string) bool {
+	svc, method, ok := strings.Cut(action, "/")
+	if !ok {
+		return false
+	}
+	methods, known := knownRPCs[svc]
+	return known && !methods[method]
 }
 
 // ActionName turns a full gRPC API name into its Cedar action name.

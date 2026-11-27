@@ -51,8 +51,7 @@ func TestUnknownRPCPermittedByName(t *testing.T) {
 	require.False(t, allowed(t, a, svcID, svc+"OtherNewRPC", "p"))
 }
 
-// A broad permit on `action` (no scope) does not need a group: but an aggregate
-// permit never reaches an RPC with no shipped group.
+// An aggregate permit never reaches an RPC with no shipped group.
 func TestAggregateDoesNotCoverUngroupedRPC(t *testing.T) {
 	t.Parallel()
 	a, err := groupsAuthorizer(t, `permit (principal in RoleClass::"service", action in [Action::"workflow-client", Action::"worker-ops"], resource)`+scope+`;`, nil)
@@ -91,7 +90,7 @@ func TestAggregateWorkflowInteract(t *testing.T) {
 // A forbid on a shipped group covers every RPC in it.
 func TestForbidOnDeleteAll(t *testing.T) {
 	t.Parallel()
-	policy := `permit (principal in RoleClass::"service", action, resource)` + scope + `;
+	policy := `permit (principal in RoleClass::"service", action in [Action::"workflow-start", Action::"delete-all"], resource)` + scope + `;
 forbid (principal, action in Action::"delete-all", resource);`
 	a, err := groupsAuthorizer(t, policy, nil)
 	require.NoError(t, err)
@@ -158,7 +157,7 @@ func TestCustomGroupValidation(t *testing.T) {
 	}
 }
 
-// The log and metric "verb" is the shipped leaf group, a bounded set.
+// Observe mode never forgives an RPC the image has no group for.
 func TestObserveNeverForgivesUngroupedRPC(t *testing.T) {
 	t.Parallel()
 	policy := `permit (principal in RoleClass::"service", action == Action::"WorkflowService/SomeBrandNewRPC", resource)` + scope + `;`
@@ -208,13 +207,12 @@ func TestCustomGroupCannotRedefineClusterAdmin(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A permit with no action scope grants every RPC that has a shipped group, but
-// never an RPC with no group. Only a permit that names it, or a customer group
-// that holds it, does. A forbid still wins.
-func TestWildcardPermitDoesNotReachUngroupedRPC(t *testing.T) {
+// A permit on shipped groups never allows an RPC with no group. Only a permit
+// that names it, or a customer group that holds it, does. A forbid still wins.
+func TestShippedGroupPermitDoesNotReachUngroupedRPC(t *testing.T) {
 	t.Parallel()
 	api := svc + "SomeBrandNewRPC"
-	wild := `permit (principal in RoleClass::"service", action, resource)` + scope + `;`
+	wild := `permit (principal in RoleClass::"service", action in [Action::"workflow-client", Action::"cluster-admin"], resource)` + scope + `;`
 	a, err := groupsAuthorizer(t, wild, nil)
 	require.NoError(t, err)
 	require.True(t, allowed(t, a, svcID, svc+"ListWorkflowExecutions", "p"), "grouped RPC still allowed")

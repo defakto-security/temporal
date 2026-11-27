@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/auth"
 	"go.temporal.io/server/common/config"
+	"go.temporal.io/server/common/metrics"
 )
 
 // countingCreds counts Retrieve calls and can be made to fail.
@@ -135,6 +136,85 @@ func TestFailedRefreshKeepsOldTokenUntilExpiry(t *testing.T) {
 	require.ErrorContains(t, err, "expired")
 }
 
+// metricsRecorder records the refresh counter results and the expiry gauge.
+type metricsRecorder struct {
+	metrics.Handler
+	mu       sync.Mutex
+	results  []string
+	expiries []float64
+}
+
+func (m *metricsRecorder) Counter(name string) metrics.CounterIface {
+	return counterFunc(func(tags []metrics.Tag) {
+		if name != metricRefresh {
+			return
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, tg := range tags {
+			if tg.Key == "result" {
+				m.results = append(m.results, tg.Value)
+			}
+		}
+	})
+}
+
+func (m *metricsRecorder) Gauge(name string) metrics.GaugeIface {
+	return gaugeFunc(func(v float64) {
+		if name != metricTokenExpires {
+			return
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.expiries = append(m.expiries, v)
+	})
+}
+
+func (m *metricsRecorder) count(result string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, r := range m.results {
+		if r == result {
+			n++
+		}
+	}
+	return n
+}
+
+type counterFunc func([]metrics.Tag)
+
+func (f counterFunc) Record(_ int64, tags ...metrics.Tag) { f(tags) }
+
+type gaugeFunc func(float64)
+
+func (f gaugeFunc) Record(v float64, _ ...metrics.Tag) { f(v) }
+
+// Every refresh is counted, a failure as result="error", and the gauge holds
+// when the newest token expires.
+func TestRefreshMetrics(t *testing.T) {
+	t.Parallel()
+	creds := &countingCreds{}
+	rec := &metricsRecorder{Handler: metrics.NoopMetricsHandler}
+	before := time.Now()
+	src, err := NewTokenSource(t.Context(), Options{
+		Endpoint: "db:5432", Region: "us-east-2", User: "u", Credentials: creds,
+		RefreshInterval: 10 * time.Millisecond, Metrics: rec,
+	})
+	require.NoError(t, err)
+	t.Cleanup(src.Close)
+
+	// Background refreshes may add more, so only a lower bound is stable.
+	require.GreaterOrEqual(t, rec.count("ok"), 1, "the first token is counted")
+	rec.mu.Lock()
+	first := rec.expiries[0]
+	rec.mu.Unlock()
+	require.InDelta(t, float64(before.Add(TokenLifetime).Unix()), first, 2)
+
+	creds.fail.Store(true)
+	require.Eventually(t, func() bool { return rec.count("error") >= 1 }, 5*time.Second, 5*time.Millisecond)
+}
+
 func TestFirstTokenFailureFailsFast(t *testing.T) {
 	t.Parallel()
 	creds := &countingCreds{}
@@ -155,7 +235,7 @@ func TestOptionsValidation(t *testing.T) { //nolint:paralleltest // swaps a pack
 	minRefreshInterval = realMinRefresh
 	t.Cleanup(func() { minRefreshInterval = old })
 	_, err = NewTokenSource(t.Context(), Options{RefreshInterval: time.Second})
-	require.ErrorContains(t, err, "at least")
+	require.ErrorContains(t, err, "must be between")
 }
 
 func validSQL() *config.SQL {

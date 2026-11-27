@@ -1,7 +1,7 @@
 // Package config defines the defakto-spiffe-temporal config contract: the
-// versioned schema a customer's ConfigMap fills in (trust domain, issuer /
-// audience / JWKS for token verification, the DevID path template the
-// human/service derivation keys on, and the path to the Cedar policy).
+// versioned schema a customer's ConfigMap fills in (the Workload API address and
+// token audience, the DevID path template the human/service derivation keys on,
+// principal attributes, action groups, and the path to the Cedar policy).
 //
 // This is the stable surface a customer configures; it is deliberately
 // separate from go.temporal.io/server's own config, which stays stock.
@@ -112,7 +112,7 @@ type Config struct {
 
 	// DecisionLog selects which authorization decisions are logged: "off"
 	// (default; only evaluation errors and shadow/identity divergences, would_deny and would_allow, are logged), "deny", or
-	// "all" (every decision, with principal, attributes, namespace, API and verb).
+	// "all" (every decision, with principal, attributes, namespace, API and group).
 	DecisionLog string `yaml:"decisionLog"`
 
 	// IdentityMode controls the checks that run before any policy: a caller
@@ -121,10 +121,13 @@ type Config struct {
 	// "observe" allows it anyway, logs it as would_deny, and counts it as
 	// decision="allow" with the
 	// reason, so you can find callers without a valid identity before turning
-	// enforcement on. Policy decisions are unaffected: a missing or broken live
-	// policy still denies, and calls to admin, delete or
-	// unclassified APIs stay denied. Observe is no stricter than running with
-	// no authorizer at all; do not leave it on once callers are identified.
+	// enforcement on. A call that fails these checks is allowed without
+	// evaluating the policy, so a customer forbid does not stop it. A call with a
+	// valid identity is still decided by the policy, and a missing or broken
+	// live policy still denies. Calls to admin, delete or unclassified APIs stay
+	// denied. Observe is no stricter than running with no authorizer at all
+	// for callers without a valid identity; do not leave it on once callers
+	// are identified.
 	IdentityMode string `yaml:"identityMode"`
 }
 
@@ -150,13 +153,17 @@ type DatabaseIAMConfig struct {
 	// Region is the RDS region. Empty means the AWS_REGION env var.
 	Region string `yaml:"region"`
 	// RefreshInterval is how often a new token is signed in the background.
-	// A token lasts 15 minutes. Default 10m; at least MinRefreshInterval; at most 14m.
+	// A token lasts 15 minutes. Default 10m; at least MinRefreshInterval; at most MaxRefreshInterval.
 	RefreshInterval time.Duration `yaml:"refreshInterval"`
 }
 
 // MinRefreshInterval is the shortest allowed databaseIAM.refreshInterval.
 // Shorter values would hammer STS/credential providers for no benefit.
 const MinRefreshInterval = 30 * time.Second
+
+// MaxRefreshInterval is the longest allowed databaseIAM.refreshInterval. A token
+// lasts 15 minutes, so a longer gap would leave a connection with an expired one.
+const MaxRefreshInterval = 14 * time.Minute
 
 // WorkloadAPIConfig configures the SPIFFE Workload API source that supplies
 // JWT bundles. The agent streams bundles over a local socket; a token is
@@ -236,12 +243,12 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("policyPath is required"))
 	}
 	switch c.DecisionLog {
-	case "", DecisionLogOff, DecisionLogDeny, DecisionLogAll:
+	case DecisionLogOff, DecisionLogDeny, DecisionLogAll:
 	default:
 		errs = append(errs, fmt.Errorf("decisionLog %q must be one of off, deny, all", c.DecisionLog))
 	}
 	switch c.IdentityMode {
-	case "", IdentityModeEnforce, IdentityModeObserve:
+	case IdentityModeEnforce, IdentityModeObserve:
 	default:
 		errs = append(errs, fmt.Errorf("identityMode %q must be one of enforce, observe", c.IdentityMode))
 	}
@@ -254,7 +261,7 @@ func (c *Config) Validate() error {
 	if err := validateActionGroups(c.ActionGroups); err != nil {
 		errs = append(errs, err)
 	}
-	if iam := c.DatabaseIAM; iam.Enabled && (iam.RefreshInterval < MinRefreshInterval || iam.RefreshInterval > 14*time.Minute) {
+	if iam := c.DatabaseIAM; iam.Enabled && (iam.RefreshInterval < MinRefreshInterval || iam.RefreshInterval > MaxRefreshInterval) {
 		errs = append(errs, errors.New("databaseIAM.refreshInterval must be between 30s and 14m (tokens last 15m)"))
 	}
 	return errors.Join(errs...)

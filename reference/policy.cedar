@@ -12,9 +12,10 @@
 //               Add or override attributes with `attributes:` in config.yaml.
 //               trust_domain is the ID's own trust domain; config cannot change it.
 //               Any trust domain the SPIFFE agent holds a bundle for (including
-//               federated ones) can authenticate, so EVERY PERMIT MUST SCOPE
-//               principal.trust_domain, as below (or name one exact Workload).
-//               A permit that does not is rejected at load. IDs not in
+//               federated ones) can authenticate, so EVERY PERMIT MUST PIN
+//               principal.trust_domain to literals, as below (or name one exact
+//               Workload). A permit that does not is rejected at load. So is a permit
+//               with no action scope: name the groups it grants. IDs not in
 //               canonical form are denied.
 //               A policy that still scopes the
 //               principal with `== RoleClass::"x"` is rejected at load.

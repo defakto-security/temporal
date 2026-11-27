@@ -3,9 +3,12 @@ package authz
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	cedar "github.com/cedar-policy/cedar-go"
 	"github.com/cedar-policy/cedar-go/types"
@@ -13,16 +16,42 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
+	"go.temporal.io/server/common/metrics"
 
 	spiffeconfig "github.com/defakto-security/temporal/config"
 )
 
+// Metric names for policy loading.
+const (
+	metricPolicyReload   = "defakto_authz_policy_reload"
+	metricPolicyLoadedAt = "defakto_authz_policy_loaded_timestamp_seconds"
+)
+
+// reloadDebounce is how long the watcher waits after the last file event before
+// it reloads. One edit raises several events, and a write in progress can leave
+// a half-written file, so the reload waits for the writes to stop.
+const reloadDebounce = 100 * time.Millisecond
+
 // policySource loads the customer-owned Cedar policy from a file and hot-reloads
-// it on change (fsnotify). It fails closed: an absent, unparseable, or
-// schema-invalid policy leaves no usable PolicySet, and the authorizer denies.
+// it on change (fsnotify).
+//
+// At start the policy must load, or the server does not start. After that, a
+// reload that fails (a deleted file, a syntax error, a rejected policy) keeps the
+// last good policy live and is reported with a log line and the
+// defakto_authz_policy_reload{result="error"} counter. The gauge
+// defakto_authz_policy_loaded_timestamp_seconds shows when the live policy was
+// loaded, so an alert can fire when it stays old after an edit.
 type policySource struct {
 	path   string
 	logger log.Logger
+	// kind is the metric tag that tells the live and the shadow policy apart.
+	kind string
+
+	// metrics receives the reload counter and the loaded-at gauge. Set once the
+	// authorizer has its handler; nil before that.
+	metrics atomic.Pointer[metrics.Handler]
+	// loadedAt is the Unix time of the last good load.
+	loadedAt atomic.Int64
 
 	// current holds the last successfully-parsed *cedar.PolicySet, or nil.
 	// Read on the hot path with no lock; swapped atomically on reload.
@@ -31,13 +60,17 @@ type policySource struct {
 	// groups says which action names a policy may use. Nil skips the check.
 	groups *actionGroups
 
+	// attrs is every attribute a policy may read as principal.<name>: the
+	// configured attribute rules plus trust_domain.
+	attrs map[string]bool
+
 	watcher *fsnotify.Watcher
 }
 
 // newPolicySource loads the policy at path once (which MUST succeed, or the
 // server refuses to start) and begins watching it for changes.
-func newPolicySource(path string, groups *actionGroups, logger log.Logger) (*policySource, error) {
-	s := &policySource{path: path, logger: logger, groups: groups}
+func newPolicySource(path, kind string, groups *actionGroups, attrs map[string]bool, logger log.Logger) (*policySource, error) {
+	s := &policySource{path: path, kind: kind, logger: logger, groups: groups, attrs: attrs}
 	if err := s.reload(); err != nil {
 		return nil, fmt.Errorf("initial policy load: %w", err)
 	}
@@ -70,19 +103,123 @@ func (s *policySource) reload() error {
 	if err := requireTrustDomainScope(ps); err != nil {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
+	if err := rejectUnknownPrincipalAttributes(ps, s.attrs); err != nil {
+		return fmt.Errorf("policy %q: %w", s.path, err)
+	}
+	if err := rejectUnscopedActions(ps); err != nil {
+		return fmt.Errorf("policy %q: %w", s.path, err)
+	}
 	if err := s.groups.rejectUnknownActionGroups(ps); err != nil {
 		return fmt.Errorf("policy %q: %w", s.path, err)
 	}
+	s.warnUnknownRPCs(ps)
 	s.current.Store(ps)
+	s.loadedAt.Store(time.Now().Unix())
 	return nil
 }
 
-// requireTrustDomainScope refuses a permit that does not mention
-// principal.trust_domain, unless it names one exact Workload. Any trust domain
-// the SPIFFE agent holds a bundle for (federated ones too) can authenticate,
-// so an unscoped permit would admit all of them. This is a guard against
-// forgetting the scope, not a proof: it checks that the condition reads the
-// attribute, not what the condition does with it.
+// setMetrics gives the source its metrics handler and publishes the loaded-at
+// gauge for the policy that is already live.
+func (s *policySource) setMetrics(h metrics.Handler) {
+	s.metrics.Store(&h)
+	s.publishLoadedAt()
+}
+
+func (s *policySource) publishLoadedAt() {
+	if h := s.metrics.Load(); h != nil {
+		(*h).Gauge(metricPolicyLoadedAt).Record(float64(s.loadedAt.Load()), metrics.StringTag("policy", s.kind))
+	}
+}
+
+// reloadAndReport reloads the policy after a file change and reports the result.
+func (s *policySource) reloadAndReport() {
+	err := s.reload()
+	result := "ok"
+	if err != nil {
+		result = "error"
+		// Keep serving the last good policy; surface the failure loudly.
+		s.logger.Error("cedar policy reload failed; keeping previous policy",
+			tag.NewStringTag("policy", s.kind), tag.Error(err))
+	} else {
+		s.logger.Info("cedar policy reloaded", tag.NewStringTag("policy", s.kind))
+	}
+	if h := s.metrics.Load(); h != nil {
+		(*h).Counter(metricPolicyReload).Record(1,
+			metrics.StringTag("policy", s.kind), metrics.StringTag("result", result))
+	}
+	if err == nil {
+		s.publishLoadedAt()
+	}
+}
+
+// rejectUnknownPrincipalAttributes refuses a policy that reads principal.<name>
+// for a name that is not trust_domain or a configured attribute. Cedar reports
+// the missing attribute as an error on every call, and the authorizer denies
+// every call that reaches the policy, so one typo would be a cluster-wide
+// outage. Nil attrs skips the check.
+func rejectUnknownPrincipalAttributes(ps *cedar.PolicySet, attrs map[string]bool) error {
+	if attrs == nil {
+		return nil
+	}
+	var bad []string
+	for id, p := range ps.All() {
+		for _, c := range p.AST().Conditions {
+			ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
+				if t, ok := n.(ast.NodeTypeAccess); ok && isPrincipalVar(t.Arg) && !attrs[string(t.Value)] {
+					bad = append(bad, fmt.Sprintf("policy %s reads principal.%s", id, t.Value))
+				}
+				return true
+			})
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	known := make([]string, 0, len(attrs))
+	for n := range attrs {
+		known = append(known, n)
+	}
+	sort.Strings(known)
+	return fmt.Errorf("%s, which is not an attribute; known attributes: %s (add one under `attributes` in config.yaml)",
+		strings.Join(bad, "; "), strings.Join(known, ", "))
+}
+
+// rejectUnscopedActions refuses a permit with no action scope. Such a permit
+// grants every RPC that has a shipped group, the admin groups included, and is
+// almost always a mistake. A forbid may leave the action unscoped.
+func rejectUnscopedActions(ps *cedar.PolicySet) error {
+	var bad []string
+	for id, p := range ps.All() {
+		if a := p.AST(); a.Effect == ast.EffectPermit {
+			if _, all := a.Action.(ast.ScopeTypeAll); all {
+				bad = append(bad, string(id))
+			}
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return fmt.Errorf("%s is a permit with no action scope, which grants every group, the admin groups included; "+
+		"scope it with `action in [Action::\"<group>\", ...]` (the README lists the groups)",
+		strings.Join(bad, ", "))
+}
+
+// requireTrustDomainScope refuses a permit that does not pin
+// principal.trust_domain to literal values, unless it names one exact Workload.
+// Any trust domain the SPIFFE agent holds a bundle for (federated ones too) can
+// authenticate, so an unpinned permit would admit all of them.
+//
+// A permit passes when one of its conditions requires the trust domain to equal
+// a string literal, or to be one of a list of literals:
+//
+//	when   { principal.trust_domain == "corp.example" && ... }
+//	when   { ["a.example", "b.example"].contains(principal.trust_domain) }
+//	unless { principal.trust_domain != "corp.example" || ... }
+//
+// A comparison with another attribute, a `!=` in a `when`, an `||` with a
+// condition on anything else, or a negation does not pin it, and is refused.
 func requireTrustDomainScope(ps *cedar.PolicySet) error {
 	for id, p := range ps.All() {
 		a := p.AST()
@@ -92,29 +229,107 @@ func requireTrustDomainScope(ps *cedar.PolicySet) error {
 		if sc, ok := a.Principal.(ast.ScopeTypeEq); ok && sc.Entity.Type == entityWorkload {
 			continue
 		}
-		if !conditionsReadTrustDomain(a.Conditions) {
-			return fmt.Errorf("policy %s is a permit that does not scope principal.trust_domain; "+
+		if !conditionsPinTrustDomain(a.Conditions) {
+			return fmt.Errorf("policy %s is a permit that does not pin principal.trust_domain to a literal; "+
 				"add `when { principal.trust_domain == \"<your trust domain>\" }` "+
-				"(federated trust domains can authenticate, so an unscoped permit admits them)", id)
+				"(federated trust domains can authenticate, so an unpinned permit admits them)", id)
 		}
 	}
 	return nil
 }
 
-// conditionsReadTrustDomain reports whether any when/unless body reads
-// principal.trust_domain. The receiver must be the principal variable itself:
-// `context.trust_domain` or a record literal's field does not count.
-func conditionsReadTrustDomain(conds []ast.ConditionType) bool {
-	found := false
+// conditionsPinTrustDomain reports whether the conditions, which all must hold,
+// force principal.trust_domain to a literal. One pinning condition is enough.
+func conditionsPinTrustDomain(conds []ast.ConditionType) bool {
 	for _, c := range conds {
-		ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
-			if t, ok := n.(ast.NodeTypeAccess); ok && string(t.Value) == spiffeconfig.TrustDomainAttribute && isPrincipalVar(t.Arg) {
-				found = true
+		switch c.Condition {
+		case ast.ConditionWhen:
+			if pinsWhenTrue(c.Body) {
+				return true
 			}
-			return !found
-		})
+		case ast.ConditionUnless:
+			// unless { A || B } holds when A and B are both false, so one
+			// disjunct that is `trust_domain != literal` pins it.
+			for _, d := range splitOp(c.Body, true) {
+				if ne, ok := d.(ast.NodeTypeNotEquals); ok && isTrustDomainVsLiteral(ne.Left, ne.Right) {
+					return true
+				}
+			}
+		}
 	}
-	return found
+	return false
+}
+
+// pinsWhenTrue reports whether n being true forces principal.trust_domain to a
+// literal: one `&&` operand is such a test, or an `||` whose every operand is.
+func pinsWhenTrue(n ast.IsNode) bool {
+	return slices.ContainsFunc(splitOp(n, false), pinsOne)
+}
+
+// pinsOne reports whether n, an operand of `&&`, forces the trust domain.
+func pinsOne(n ast.IsNode) bool {
+	switch t := n.(type) {
+	case ast.NodeTypeEquals:
+		return isTrustDomainVsLiteral(t.Left, t.Right)
+	case ast.NodeTypeContains:
+		set, ok := t.Left.(ast.NodeTypeSet)
+		if !ok || !isTrustDomain(t.Right) || len(set.Elements) == 0 {
+			return false
+		}
+		for _, e := range set.Elements {
+			if !isStringLiteral(e) {
+				return false
+			}
+		}
+		return true
+	case ast.NodeTypeOr:
+		// Every branch must pin it: `td == "a" || td == "b"`, not `|| true`.
+		// A branch may be a conjunction, such as `td == "a" && ns == "x"`.
+		for _, d := range splitOp(t, true) {
+			if !pinsWhenTrue(d) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// splitOp flattens a chain of `||` (or, when or is false, `&&`) into operands.
+func splitOp(n ast.IsNode, or bool) []ast.IsNode {
+	switch t := n.(type) {
+	case ast.NodeTypeOr:
+		if or {
+			return append(splitOp(t.Left, or), splitOp(t.Right, or)...)
+		}
+	case ast.NodeTypeAnd:
+		if !or {
+			return append(splitOp(t.Left, or), splitOp(t.Right, or)...)
+		}
+	}
+	return []ast.IsNode{n}
+}
+
+// isTrustDomain reports whether n is `principal.trust_domain`.
+func isTrustDomain(n ast.IsNode) bool {
+	t, ok := n.(ast.NodeTypeAccess)
+	return ok && string(t.Value) == spiffeconfig.TrustDomainAttribute && isPrincipalVar(t.Arg)
+}
+
+// isStringLiteral reports whether n is a string literal.
+func isStringLiteral(n ast.IsNode) bool {
+	v, ok := n.(ast.NodeValue)
+	if !ok {
+		return false
+	}
+	_, ok = v.Value.(types.String)
+	return ok
+}
+
+// isTrustDomainVsLiteral reports whether a and b are principal.trust_domain and
+// a string literal, in either order.
+func isTrustDomainVsLiteral(a, b ast.IsNode) bool {
+	return (isTrustDomain(a) && isStringLiteral(b)) || (isTrustDomain(b) && isStringLiteral(a))
 }
 
 // isPrincipalVar reports whether n is the `principal` variable.
@@ -123,21 +338,12 @@ func isPrincipalVar(n ast.IsNode) bool {
 	return ok && v.Name == "principal"
 }
 
-// rejectUnknownActionGroups refuses a policy whose action scope names a group
-// that is neither shipped nor in config actionGroups. A misspelled group, such as
-// "delte-all" in a forbid, would match nothing and silently stop forbidding.
-// A name with a "/" is one RPC, which a policy may name even when the image does
-// not know it yet, so it is not checked. The action scope and every when or
-// unless body are both checked.
-func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
-	if g == nil {
-		return nil
-	}
-	var bad []string
+// actionEntities calls visit for every Action entity a policy names, in its
+// action scope and in any when or unless body.
+func actionEntities(ps *cedar.PolicySet, visit func(id cedar.PolicyID, uid types.EntityUID)) {
 	check := func(id cedar.PolicyID, uid types.EntityUID) {
-		name := string(uid.ID)
-		if uid.Type == actionAccess && !strings.Contains(name, "/") && !g.knownGroup(name) {
-			bad = append(bad, fmt.Sprintf("policy %s: unknown action group %q", id, name))
+		if uid.Type == actionAccess {
+			visit(id, uid)
 		}
 	}
 	for id, p := range ps.All() {
@@ -152,7 +358,7 @@ func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
 			}
 		}
 		// An Action entity inside a when or unless body, such as
-		// `unless { action in Action::"delte-all" }`, is checked the same way.
+		// `unless { action in Action::"delte-all" }`, is visited the same way.
 		for _, c := range p.AST().Conditions {
 			ast.Inspect(ast.NewNode(c.Body), func(n ast.IsNode) bool {
 				if v, ok := n.(ast.NodeValue); ok {
@@ -171,12 +377,46 @@ func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
 			})
 		}
 	}
+}
+
+// rejectUnknownActionGroups refuses a policy whose action scope names a group
+// that is neither shipped nor in config actionGroups. A misspelled group, such as
+// "delte-all" in a forbid, would match nothing and silently stop forbidding.
+// A name with a "/" is one RPC, which a policy may name even when the image does
+// not know it yet, so it is not rejected; warnUnknownRPCs reports a likely typo.
+// The action scope and every when or unless body are both checked.
+func (g *actionGroups) rejectUnknownActionGroups(ps *cedar.PolicySet) error {
+	if g == nil {
+		return nil
+	}
+	var bad []string
+	actionEntities(ps, func(id cedar.PolicyID, uid types.EntityUID) {
+		name := string(uid.ID)
+		if !strings.Contains(name, "/") && !g.knownGroup(name) {
+			bad = append(bad, fmt.Sprintf("policy %s: unknown action group %q", id, name))
+		}
+	})
 	if len(bad) == 0 {
 		return nil
 	}
 	sort.Strings(bad)
 	return fmt.Errorf("%s; use a shipped group, a name from config actionGroups, or one RPC as \"<Service>/<Method>\"",
 		strings.Join(bad, "; "))
+}
+
+// warnUnknownRPCs logs a warning for each RPC the policy names that looks like a
+// typo: a method the image's own Temporal services do not have. It cannot reject
+// them, because a policy may name a new RPC before this image knows it. A
+// misspelled name in a forbid would otherwise forbid nothing without any signal.
+func (s *policySource) warnUnknownRPCs(ps *cedar.PolicySet) {
+	actionEntities(ps, func(id cedar.PolicyID, uid types.EntityUID) {
+		if name := string(uid.ID); unknownRPC(name) {
+			s.logger.Warn("policy names an RPC this image does not know; a typo here matches nothing",
+				tag.NewStringTag("policy", s.kind),
+				tag.NewStringTag("policyID", string(id)),
+				tag.NewStringTag("action", name))
+		}
+	})
 }
 
 // rejectLegacyPrincipalScopes refuses a policy whose principal scope is
@@ -245,7 +485,7 @@ func (s *policySource) watch() error {
 	}
 	// Watch the parent dir, not the file: a ConfigMap update replaces the file
 	// via an atomic symlink swap, which a direct file watch misses.
-	if err := w.Add(dirOf(s.path)); err != nil {
+	if err := w.Add(filepath.Dir(s.path)); err != nil {
 		_ = w.Close()
 		return err
 	}
@@ -254,20 +494,34 @@ func (s *policySource) watch() error {
 	return nil
 }
 
-// loop reloads the policy on each watcher event until the watcher closes.
+// relevant reports whether a directory event can change the policy: the policy
+// file itself, the file it links to when the path is a symlink to a sibling,
+// or "..data", the symlink a mounted ConfigMap swaps on update.
+func (s *policySource) relevant(ev fsnotify.Event) bool {
+	name := filepath.Base(ev.Name)
+	if name == filepath.Base(s.path) || name == "..data" {
+		return true
+	}
+	target, err := filepath.EvalSymlinks(s.path)
+	return err == nil && name == filepath.Base(target)
+}
+
+// loop reloads the policy after file events stop, until the watcher closes.
 func (s *policySource) loop() {
+	timer := time.NewTimer(reloadDebounce)
+	timer.Stop()
+	defer timer.Stop()
 	for {
 		select {
-		case _, ok := <-s.watcher.Events:
+		case ev, ok := <-s.watcher.Events:
 			if !ok {
 				return
 			}
-			if err := s.reload(); err != nil {
-				// Keep serving the last good policy; surface the failure loudly.
-				s.logger.Error("cedar policy reload failed; keeping previous policy", tag.Error(err))
-			} else {
-				s.logger.Info("cedar policy reloaded")
+			if s.relevant(ev) {
+				timer.Reset(reloadDebounce)
 			}
+		case <-timer.C:
+			s.reloadAndReport()
 		case err, ok := <-s.watcher.Errors:
 			if !ok {
 				return
@@ -283,17 +537,4 @@ func (s *policySource) Close() error {
 		return s.watcher.Close()
 	}
 	return nil
-}
-
-// dirOf returns the parent directory of path.
-func dirOf(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' {
-			if i == 0 {
-				return "/"
-			}
-			return path[:i]
-		}
-	}
-	return "."
 }
